@@ -28,9 +28,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
-  # Trigger on a schedule to build nightly releases
+  # Nightly build schedule at 13:00 UTC (5:00 AM PST)
   schedule:
-    # Runs at 1:00 PM UTC, which is 5:00 AM PST (UTC-8)
     - cron: '0 13 * * *'
 
 env:
@@ -57,7 +56,7 @@ jobs:
         echo "Input targets: $targets"
         echo "Input operating systems: $operating_systems"
 
-        # Convert targets to JSON array
+        # Convert comma-separated targets into JSON array
         matrix_targets=$(echo "$targets" \
           | tr ',' '\n' \
           | sed 's/^ *//;s/ *$//' \
@@ -66,7 +65,6 @@ jobs:
           | jq -s '{gfx_target: .}' \
           | jq -c)
 
-        # Check which operating systems to build
         should_build_windows="false"
         should_build_ubuntu="false"
         
@@ -88,10 +86,7 @@ jobs:
         echo "Generated matrix: $matrix_targets"
 
   build-windows:
-    # Pinned to windows-2022 (VS 2022 / MSVC 14.4x). The windows-latest image moved to
-    # VS 2026 (MSVC 14.51), whose <cmath> declares isgreater/isless/etc. as
-    # constexpr (implicitly __host__ __device__), which collides with ROCm clang's
-    # __device__-only HIP math wrappers and breaks the HIP build.
+    # Pinned to windows-2022 (MSVC 14.4x) to avoid <cmath> constexpr conflicts in MSVC 14.51+
     runs-on: windows-2022
     needs: prepare-matrix
     if: needs.prepare-matrix.outputs.should_build_windows == 'true'
@@ -106,47 +101,23 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       
-    - name: Clean up existing directories (safety precaution)
+    - name: Clean up workspace
       run: |
-        # Remove existing ROCmFPX directory if it exists
-        if (Test-Path "ROCmFPX") {
-          Write-Host "Removing existing ROCmFPX directory..."
-          Remove-Item -Recurse -Force "ROCmFPX"
-        }
-        
-        # Remove existing C:\opt\rocm directory if it exists
-        if (Test-Path "C:\opt\rocm") {
-          Write-Host "Removing existing C:\opt\rocm directory..."
-          Remove-Item -Recurse -Force "C:\opt\rocm"
-        }
-        
-        # Remove any existing ROCm tarball
-        if (Test-Path "rocm.tar.gz") {
-          Write-Host "Removing existing rocm.tar.gz..."
-          Remove-Item -Force "rocm.tar.gz"
-        }
-        
-        Write-Host "Cleanup completed successfully"
+        if (Test-Path "ROCmFPX") { Remove-Item -Recurse -Force "ROCmFPX" }
+        if (Test-Path "C:\opt\rocm") { Remove-Item -Recurse -Force "C:\opt\rocm" }
+        if (Test-Path "rocm.tar.gz") { Remove-Item -Force "rocm.tar.gz" }
 
     - name: Install Visual Studio Build Tools
       run: |
         $vsInstallerUrl = "https://aka.ms/vs/17/release/vs_buildtools.exe"
         $vsInstallerPath = "$env:TEMP\vs_buildtools.exe"
-        
-        Write-Host "Downloading Visual Studio Build Tools..."
         Invoke-WebRequest -Uri $vsInstallerUrl -OutFile $vsInstallerPath
-        
-        Write-Host "Installing Visual Studio Build Tools..."
         Start-Process -FilePath $vsInstallerPath -ArgumentList "--quiet", "--wait", "--norestart", "--add", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "--add", "Microsoft.VisualStudio.Component.VC.CMake.Project", "--add", "Microsoft.VisualStudio.Component.VC.ATL", "--add", "Microsoft.VisualStudio.Component.Windows11SDK.22621" -Wait
-        
         Remove-Item $vsInstallerPath -Force
 
     - name: Install build dependencies
       run: |
-        Write-Host "Installing build dependencies..."
-        
         # Install Ninja
-        Write-Host "Installing Ninja..."
         $ninjaUrl = "https://github.com/ninja-build/ninja/releases/download/v1.11.1/ninja-win.zip"
         $ninjaPath = "$env:TEMP\ninja-win.zip"
         $ninjaDir = "C:\ninja"
@@ -155,35 +126,29 @@ jobs:
         Expand-Archive -Path $ninjaPath -DestinationPath $ninjaDir -Force
         
         # Install Strawberry Perl
-        Write-Host "Installing Strawberry Perl..."
         $perlUrl = "http://strawberryperl.com/download/5.32.1.1/strawberry-perl-5.32.1.1-64bit.msi"
         $perlPath = "$env:TEMP\strawberry-perl-5.32.1.1-64bit.msi"
         Invoke-WebRequest -Uri $perlUrl -OutFile $perlPath
         Start-Process msiexec.exe -ArgumentList "/i $perlPath /quiet /norestart" -Wait
         
-        # Verify installations
         $env:PATH = "C:\ninja;C:\Strawberry\perl\bin;$env:PATH"
-        Write-Host "Verifying installations..."
         ninja --version
         perl --version
-
-        Write-Host "Build dependencies installation completed"
             
     - name: Download ROCm nightly tarball
       run: |
         $rocmVersion = "${{ env.ROCM_VERSION }}"
         $currentTarget = "${{ matrix.gfx_target }}"
         
-        # Add appropriate suffixes for different GPU targets
+        # Add -all suffix for combined targets
         $s3Target = $currentTarget
         if ($currentTarget -eq "gfx103X" -or $currentTarget -eq "gfx110X" -or $currentTarget -eq "gfx120X") {
           $s3Target = "$currentTarget-all"
-          Write-Host "Using target with -all suffix: $s3Target"
         }
         
         $baseUrl = "https://rocm.nightlies.amd.com/tarball-multi-arch"
         if ($rocmVersion -eq "latest") {
-          Write-Host "Auto-detecting latest ROCm version for target: $currentTarget"
+          Write-Host "Auto-detecting latest ROCm version for $currentTarget"
           $indexHtml = (Invoke-WebRequest "$baseUrl/" -UseBasicParsing).Content
           $filesMatch = [regex]::Match($indexHtml, 'const files = (\[.*?\]);', [System.Text.RegularExpressions.RegexOptions]::Singleline)
           if (-not $filesMatch.Success) {
@@ -207,9 +172,8 @@ jobs:
 
           if ($latestFile -match "therock-dist-windows-$s3Target-(\d+\.\d+\.\d+(?:a|rc)\d+)\.tar\.gz") {
             $rocmVersion = $matches[1]
-            Write-Host "Detected latest ROCm version: $rocmVersion"
           } else {
-            Write-Error "Failed to extract ROCm version from latest file: $latestFile"
+            Write-Error "Failed to extract version from: $latestFile"
             exit 1
           }
 
@@ -219,7 +183,7 @@ jobs:
         }
         
         echo "DETECTED_ROCM_VERSION=$rocmVersion" >> $env:GITHUB_ENV
-        Write-Host "Downloading ROCm from: $rocmUrl"
+        Write-Host "Downloading ROCm: $rocmUrl"
         Invoke-WebRequest -Uri $rocmUrl -OutFile "rocm.tar.gz"
         
     - name: Extract ROCm to C:\opt\rocm
@@ -231,28 +195,20 @@ jobs:
       run: |
         $rocmfpxVersion = "${{ env.ROCMFPX_VERSION }}"
         if ($rocmfpxVersion -eq "latest" -or $rocmfpxVersion -eq "main") {
-          Write-Host "Cloning main branch with shallow clone"
           git clone --depth 1 --single-branch --branch main https://github.com/ciru-ai/ROCmFPX.git
         } else {
-          Write-Host "Cloning ROCmFPX version: $rocmfpxVersion with shallow clone"
           git clone --depth 1 --single-branch --branch $rocmfpxVersion https://github.com/ciru-ai/ROCmFPX.git
         }
         cd ROCmFPX
-        
         $commitHash = git rev-parse --short=7 HEAD
         echo "ROCMFPX_COMMIT_HASH=$commitHash" >> $env:GITHUB_ENV
-        Write-Host "ROCmFPX commit hash: $commitHash"
-        
-        Write-Host "Current ROCmFPX commit:"
         git log --oneline -1
 
     - name: Build ROCmFPX + ROCm
       shell: cmd
       run: |
-        REM Map GPU targets
+        REM Map target aliases to concrete architectures
         set "current_target=${{ matrix.gfx_target }}"
-        echo Input target: %current_target%
-        
         if "%current_target%"=="gfx110X" (
           set "mapped_target=gfx1100;gfx1101;gfx1102;gfx1103"
         ) else if "%current_target%"=="gfx103X" (
@@ -266,24 +222,19 @@ jobs:
         ) else (
           set "mapped_target=%current_target%"
         )
-        echo Mapped target: %mapped_target%
 
-        REM Set up environment variables and PATH
         set HIP_PATH=C:\opt\rocm
         set HIP_PLATFORM=amd
         set PATH=%HIP_PATH%\lib\llvm\bin;%HIP_PATH%\bin;%PATH%
 
-        REM Set up x64 Native Tools Command Prompt environment
         call "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath > vs_path.txt
         set /p VS_PATH=<vs_path.txt
         call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
 
-        REM Create build directory
         cd ROCmFPX
         mkdir build
         cd build
 
-        REM Configure the project
         cmake .. -G Ninja ^
           -DCMAKE_C_COMPILER="C:\opt\rocm\lib\llvm\bin\clang.exe" ^
           -DCMAKE_CXX_COMPILER="C:\opt\rocm\lib\llvm\bin\clang++.exe" ^
@@ -304,18 +255,12 @@ jobs:
           -DGGML_STATIC=OFF ^
           -DCMAKE_SYSTEM_NAME=Windows
 
-        REM Build the project
         cmake --build . -j %NUMBER_OF_PROCESSORS%
         
     - name: Copy ROCm core DLLs to build directory
       run: |
-        $rocmVersion = if ($env:DETECTED_ROCM_VERSION) { $env:DETECTED_ROCM_VERSION } else { $env:ROCM_VERSION }
         $buildBinPath = "ROCmFPX\build\bin"
         $rocmBinPath = "C:\opt\rocm\bin"
-        
-        Write-Host "Copying ROCm core DLL files to build directory..."
-        Write-Host "Source: $rocmBinPath"
-        Write-Host "Destination: $buildBinPath"
         
         if (Test-Path $rocmBinPath) {
           $filesToCopy = @(
@@ -335,48 +280,29 @@ jobs:
             $matchingFiles = Get-ChildItem -Path $rocmBinPath -Name $pattern -ErrorAction SilentlyContinue
             if ($matchingFiles) {
               foreach ($file in $matchingFiles) {
-                $sourcePath = Join-Path $rocmBinPath $file
-                $destPath = Join-Path $buildBinPath $file
-                Copy-Item $sourcePath $destPath
-                Write-Host "Copied: $file"
+                Copy-Item (Join-Path $rocmBinPath $file) (Join-Path $buildBinPath $file)
               }
-            } else {
-              Write-Host "Warning: No files found matching pattern: $pattern"
             }
           }
           
-          # Copy rocblas\library folder
+          # Copy rocblas and hipblaslt kernel libraries
           $rocblasLibPath = Join-Path $rocmBinPath "rocblas\library"
           if (Test-Path $rocblasLibPath) {
-            Write-Host "Copying rocblas\library folder..."
-            $destRocblasPath = Join-Path $buildBinPath "rocblas\library"
-            Copy-Item -Path $rocblasLibPath -Destination $destRocblasPath -Recurse -Force
-            Write-Host "Copied: rocblas\library folder"
-          } else {
-            Write-Host "Warning: rocblas\library folder not found at: $rocblasLibPath"
+            Copy-Item -Path $rocblasLibPath -Destination (Join-Path $buildBinPath "rocblas\library") -Recurse -Force
           }
 
-          # Copy hipblaslt\library folder
           $hipblasltLibPath = Join-Path $rocmBinPath "hipblaslt\library"
           if (Test-Path $hipblasltLibPath) {
-            Write-Host "Copying hipblaslt\library folder..."
-            $destHipblasltPath = Join-Path $buildBinPath "hipblaslt\library"
-            Copy-Item -Path $hipblasltLibPath -Destination $destHipblasltPath -Recurse -Force
-            Write-Host "Copied: hipblaslt\library folder"
-          } else {
-            Write-Host "Warning: hipblaslt\library folder not found at: $hipblasltLibPath"
+            Copy-Item -Path $hipblasltLibPath -Destination (Join-Path $buildBinPath "hipblaslt\library") -Recurse -Force
           }
-          
-          Write-Host "ROCm core files successfully copied to build directory"
         } else {
-          Write-Error "ROCm bin directory not found: $rocmBinPath"
+          Write-Error "ROCm directory not found: $rocmBinPath"
           exit 1
         }
         
-    - name: List build artifacts (including ROCm files)
+    - name: List build artifacts
       run: |
         cd ROCmFPX\build\bin
-        Write-Host "Final build artifacts (including ROCm core files):"
         Get-ChildItem -Recurse | Format-Table Name, Length, LastWriteTime
         
     - name: Upload build artifacts
@@ -390,18 +316,9 @@ jobs:
     - name: Set job outputs
       id: set-outputs
       run: |
-        Write-Host "Setting job outputs..."
-        Write-Host "Current target: ${{ matrix.gfx_target }}"
-        Write-Host "DETECTED_ROCM_VERSION: $env:DETECTED_ROCM_VERSION"
-        Write-Host "ROCM_VERSION: $env:ROCM_VERSION"
-        Write-Host "ROCMFPX_COMMIT_HASH: $env:ROCMFPX_COMMIT_HASH"
-        
         $rocmVersion = if ($env:DETECTED_ROCM_VERSION) { $env:DETECTED_ROCM_VERSION } else { $env:ROCM_VERSION }
-        echo "rocm_version=$rocmVersion" >> $env:GITHUB_OUTPUT
-        echo "rocmfpx_commit_hash=$env:ROCMFPX_COMMIT_HASH" >> $env:GITHUB_OUTPUT
-        
-        Write-Host "Final rocm_version: $rocmVersion"
-        Write-Host "Final rocmfpx_commit_hash: $env:ROCMFPX_COMMIT_HASH"
+        echo "rocm_version=$rocmVersion" >> $GITHUB_OUTPUT
+        echo "rocmfpx_commit_hash=$env:ROCMFPX_COMMIT_HASH" >> $GITHUB_OUTPUT
         
     - name: Create release summary
       run: |
@@ -414,11 +331,7 @@ jobs:
         - **ROCmFPX Commit Hash**: ${{ env.ROCMFPX_COMMIT_HASH }}
         - **Build Type**: Release
         - **Platform**: Windows
-        
-        ## Build Artifacts
-        The compiled binaries are available in the build artifacts.
         "@
-        
         Set-Content -Path "build-summary-windows-${{ matrix.gfx_target }}.md" -Value $summary
         
     - name: Upload build summary
@@ -429,23 +342,13 @@ jobs:
         path: build-summary-windows-${{ matrix.gfx_target }}.md
         retention-days: 30
         
-    - name: Clean up build artifacts and temporary files
+    - name: Clean up workspace
       if: always()
       run: |
-        Write-Host "Starting cleanup process..."
-        if (Test-Path "rocm.tar.gz") {
-          Remove-Item -Force "rocm.tar.gz"
-        }
-        if (Test-Path "C:\opt\rocm") {
-          Remove-Item -Recurse -Force "C:\opt\rocm"
-        }
-        if (Test-Path "ROCmFPX") {
-          Remove-Item -Recurse -Force "ROCmFPX"
-        }
-        if (Test-Path "build-summary-windows-${{ matrix.gfx_target }}.md") {
-          Remove-Item -Force "build-summary-windows-${{ matrix.gfx_target }}.md"
-        }
-        Write-Host "Cleanup completed successfully"
+        if (Test-Path "rocm.tar.gz") { Remove-Item -Force "rocm.tar.gz" }
+        if (Test-Path "C:\opt\rocm") { Remove-Item -Recurse -Force "C:\opt\rocm" }
+        if (Test-Path "ROCmFPX") { Remove-Item -Recurse -Force "ROCmFPX" }
+        if (Test-Path "build-summary-windows-${{ matrix.gfx_target }}.md") { Remove-Item -Force "build-summary-windows-${{ matrix.gfx_target }}.md" }
 
   build-ubuntu:
     runs-on: ubuntu-22.04
@@ -465,32 +368,16 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       
-    - name: Clean up existing directories (safety precaution)
+    - name: Clean up workspace
       run: |
-        if [ -d "ROCmFPX" ]; then
-          echo "Removing existing ROCmFPX directory..."
-          rm -rf ROCmFPX
-        fi
-        if [ -d "/opt/rocm" ]; then
-          echo "Removing existing /opt/rocm directory..."
-          sudo rm -rf /opt/rocm
-        fi
-        if [ -f "rocm.tar.gz" ]; then
-          echo "Removing existing rocm.tar.gz..."
-          rm -f rocm.tar.gz
-        fi
-        echo "Cleanup completed successfully"
+        if [ -d "ROCmFPX" ]; then rm -rf ROCmFPX; fi
+        if [ -d "/opt/rocm" ]; then sudo rm -rf /opt/rocm; fi
+        if [ -f "rocm.tar.gz" ]; then rm -f rocm.tar.gz; fi
 
     - name: Install build dependencies
       run: |
-        echo "Installing build dependencies..."
         sudo apt update
         sudo apt install -y cmake ninja-build unzip curl patchelf
-        
-        echo "Verifying installations..."
-        cmake --version
-        ninja --version
-        echo "Build dependencies installation completed"
             
     - name: Download and extract ROCm directly to /opt/rocm
       run: |
@@ -500,12 +387,11 @@ jobs:
         s3_target="$current_target"
         if [[ "$current_target" = "gfx103X" || "$current_target" = "gfx110X" || "$current_target" = "gfx120X" ]]; then
           s3_target="${current_target}-all"
-          echo "Using target with -all suffix: $s3_target"
         fi
         
         base_url="https://rocm.nightlies.amd.com/tarball-multi-arch"
         if [ "$rocm_version" = "latest" ]; then
-          echo "Auto-detecting latest ROCm version for target: $current_target"
+          echo "Auto-detecting latest ROCm version for $current_target"
           prefix="therock-dist-linux-${s3_target}-"
 
           files_json=$(curl -s "$base_url/" | tr '\n' ' ' | grep -oP 'const files = \K\[.*?\](?=\s*;)')
@@ -526,7 +412,7 @@ jobs:
             rocm_version="${BASH_REMATCH[1]}"
             echo "Detected latest ROCm version: $rocm_version"
           else
-            echo "Failed to extract ROCm version from latest file: $latest_file"
+            echo "Failed to extract ROCm version from: $latest_file"
             exit 1
           fi
 
@@ -536,15 +422,11 @@ jobs:
         fi
         
         echo "DETECTED_ROCM_VERSION=$rocm_version" >> $GITHUB_ENV
-        echo "Streaming ROCm from: $rocm_url directly to extraction"
-        
         sudo mkdir -p /opt/rocm
         curl -sL "$rocm_url" | sudo tar --use-compress-program=gzip -xf - -C /opt/rocm --strip-components=1
         
     - name: Set ROCm environment variables
       run: |
-        echo "Setting ROCm environment variables..."
-        
         echo "HIP_PATH=/opt/rocm" >> $GITHUB_ENV
         echo "ROCM_PATH=/opt/rocm" >> $GITHUB_ENV
         echo "HIP_PLATFORM=amd" >> $GITHUB_ENV
@@ -552,41 +434,28 @@ jobs:
         echo "HIP_INCLUDE_PATH=/opt/rocm/include" >> $GITHUB_ENV
         echo "HIP_LIB_PATH=/opt/rocm/lib" >> $GITHUB_ENV
         echo "HIP_DEVICE_LIB_PATH=/opt/rocm/lib/llvm/amdgcn/bitcode" >> $GITHUB_ENV
-        
         echo "/opt/rocm/bin:/opt/rocm/llvm/bin:$PATH" >> $GITHUB_PATH
-        
         echo "LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:/opt/rocm/llvm/lib:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
         echo "LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:${LIBRARY_PATH:-}" >> $GITHUB_ENV
         echo "CPATH=/opt/rocm/include:${CPATH:-}" >> $GITHUB_ENV
         echo "PKG_CONFIG_PATH=/opt/rocm/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> $GITHUB_ENV
         
-        echo "ROCm environment variables set successfully"
-        
     - name: Clone ROCmFPX
       run: |
         rocmfpx_version="${{ env.ROCMFPX_VERSION }}"
         if [ "$rocmfpx_version" = "latest" ] || [ "$rocmfpx_version" = "main" ]; then
-          echo "Cloning main branch with shallow clone"
           git clone --depth 1 --single-branch --branch main https://github.com/ciru-ai/ROCmFPX.git
         else
-          echo "Cloning ROCmFPX version: $rocmfpx_version with shallow clone"
           git clone --depth 1 --single-branch --branch "$rocmfpx_version" https://github.com/ciru-ai/ROCmFPX.git
         fi
         cd ROCmFPX
-        
         commit_hash=$(git rev-parse --short=7 HEAD)
         echo "ROCMFPX_COMMIT_HASH=$commit_hash" >> $GITHUB_ENV
-        echo "ROCmFPX commit hash: $commit_hash"
-        
-        echo "Current ROCmFPX commit:"
         git log --oneline -1
 
     - name: Build ROCmFPX + ROCm
       run: |
-        # Map GPU targets
         current_target="${{ matrix.gfx_target }}"
-        echo "Input target: $current_target"
-        
         if [ "$current_target" = "gfx110X" ]; then
           mapped_target="gfx1100;gfx1101;gfx1102;gfx1103"
         elif [ "$current_target" = "gfx103X" ]; then
@@ -600,14 +469,11 @@ jobs:
         else
           mapped_target="$current_target"
         fi
-        echo "Mapped target: $mapped_target"
 
-        # Create build directory
         cd ROCmFPX
         mkdir build
         cd build
 
-        # Configure the project
         cmake .. -G Ninja \
           -DCMAKE_C_COMPILER=/opt/rocm/llvm/bin/clang \
           -DCMAKE_CXX_COMPILER=/opt/rocm/llvm/bin/clang++ \
@@ -628,73 +494,60 @@ jobs:
           -DGGML_STATIC=OFF \
           -DCMAKE_SYSTEM_NAME=Linux
 
-        # Build the project
         cmake --build . -j $(nproc)
         
     - name: Copy ROCm core libs to build directory
       run: |
         build_bin_path="ROCmFPX/build/bin"
         
-        # Copy rocblas/library folder
+        # Copy BLAS kernel folders
         rocblas_lib_path="/opt/rocm/lib/rocblas/library"
         if [ -d "$rocblas_lib_path" ]; then
-          echo "Copying rocblas/library folder and all contents..."
           dest_rocblas_path="$build_bin_path/rocblas/library"
           mkdir -p "$(dirname "$dest_rocblas_path")"
           cp -r "$rocblas_lib_path" "$(dirname "$dest_rocblas_path")/"
-          echo "Copied rocblas/library"
         fi
 
-        # Copy hipblaslt/library folder
         hipblaslt_lib_path="/opt/rocm/lib/hipblaslt/library"
         if [ -d "$hipblaslt_lib_path" ]; then
-          echo "Copying hipblaslt/library folder and all contents..."
           dest_hipblaslt_path="$build_bin_path/hipblaslt/library"
           mkdir -p "$(dirname "$dest_hipblaslt_path")"
           cp -r "$hipblaslt_lib_path" "$(dirname "$dest_hipblaslt_path")/"
-          echo "Copied hipblaslt/library"
         fi
  
-        echo "Copying required ROCm libraries to build directory..."
-        cp -v /opt/rocm/lib/libhipblas.so* "$build_bin_path/" 2>/dev/null || echo "libhipblas.so* not found"
-        cp -v /opt/rocm/lib/librocblas.so* "$build_bin_path/" 2>/dev/null || echo "librocblas.so* not found"
-        cp -v /opt/rocm/lib/libamdhip64.so* "$build_bin_path/" 2>/dev/null || echo "libamdhip64.so* not found"
-        cp -v /opt/rocm/lib/librocsolver.so* "$build_bin_path/" 2>/dev/null || echo "librocsolver.so* not found"
-        cp -v /opt/rocm/lib/libroctx64.so* "$build_bin_path/" 2>/dev/null || echo "libroctx64.so* not found"
-        cp -v /opt/rocm/lib/libhipblaslt.so* "$build_bin_path/" 2>/dev/null || echo "libhipblaslt.so* not found"
-        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_liblzma.so* "$build_bin_path/" 2>/dev/null || echo "librocm_sysdeps_liblzma.so* not found"
-        cp -v /opt/rocm/lib/librocprofiler-register.so* "$build_bin_path/" 2>/dev/null || echo "librocprofiler-register.so* not found"
-        cp -v /opt/rocm/lib/libamd_comgr.so* "$build_bin_path/" 2>/dev/null || echo "libamd_comgr.so* not found"
-        cp -v /opt/rocm/lib/libamd_comgr_loader.so* "$build_bin_path/" 2>/dev/null || echo "libamd_comgr_loader.so* not found"
-        cp -v /opt/rocm/lib/libhsa-runtime64.so* "$build_bin_path/" 2>/dev/null || echo "libhsa-runtime64.so* not found"
-        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_numa.so* "$build_bin_path/" 2>/dev/null || echo "librocm_sysdeps_numa.so* not found"
-        cp -v /opt/rocm/lib/librocroller.so* "$build_bin_path/" 2>/dev/null || echo "librocroller.so* not found"
-        cp -v /opt/rocm/lib/liborigami.so* "$build_bin_path/" 2>/dev/null || echo "liborigami.so* not found"
-        cp -v /opt/rocm/lib/librocm_kpack.so* "$build_bin_path/" 2>/dev/null || echo "librocm_kpack.so* not found"
-        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_z.so* "$build_bin_path/" 2>/dev/null || echo "librocm_sysdeps_z.so* not found"
-        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_zstd.so* "$build_bin_path/" 2>/dev/null || echo "librocm_sysdeps_zstd.so* not found"
-        cp -v /opt/rocm/lib/llvm/lib/libLLVM.so* "$build_bin_path/" 2>/dev/null || echo "libLLVM.so* not found"
-        cp -v /opt/rocm/lib/llvm/lib/libclang-cpp.so* "$build_bin_path/" 2>/dev/null || echo "libclang-cpp.so* not found"
-        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_elf.so* "$build_bin_path/" 2>/dev/null || echo "librocm_sysdeps_elf.so* not found"
-        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_drm.so* "$build_bin_path/" 2>/dev/null || echo "librocm_sysdeps_drm.so* not found"
-        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_drm_amdgpu.so* "$build_bin_path/" 2>/dev/null || echo "librocm_sysdeps_drm_amdgpu.so* not found"
-        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_bz2.so* "$build_bin_path/" 2>/dev/null || echo "librocm_sysdeps_bz2.so* not found"
-
-        echo "Finished copying required ROCm libraries"
+        # Copy required ROCm dynamic shared libraries
+        cp -v /opt/rocm/lib/libhipblas.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/librocblas.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/libamdhip64.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/librocsolver.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/libroctx64.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/libhipblaslt.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_liblzma.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/librocprofiler-register.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/libamd_comgr.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/libamd_comgr_loader.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/libhsa-runtime64.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_numa.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/librocroller.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/liborigami.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/librocm_kpack.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_z.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_zstd.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/llvm/lib/libLLVM.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/llvm/lib/libclang-cpp.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_elf.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_drm.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_drm_amdgpu.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_bz2.so* "$build_bin_path/" 2>/dev/null || true
 
     - name: Set RPATH for portable distribution
       run: |
         cd ROCmFPX/build/bin
+        # Set RPATH to $ORIGIN so all libraries find adjacent dependencies locally
         for file in *.so* llama-*; do
           [ -f "$file" ] && [ ! -L "$file" ] && patchelf --set-rpath '$ORIGIN' "$file" 2>/dev/null || true
         done
 
-    - name: List build artifacts (including ROCm files)
-      run: |
-        cd ROCmFPX/build/bin
-        echo "Final build artifacts:"
-        ls -la
-        
     - name: Upload build artifacts
       id: upload-artifacts
       uses: actions/upload-artifact@v4
@@ -706,18 +559,9 @@ jobs:
     - name: Set job outputs
       id: set-outputs
       run: |
-        echo "Setting job outputs..."
-        echo "Current target: ${{ matrix.gfx_target }}"
-        echo "DETECTED_ROCM_VERSION: ${DETECTED_ROCM_VERSION}"
-        echo "ROCM_VERSION: ${{ env.ROCM_VERSION }}"
-        echo "ROCMFPX_COMMIT_HASH: ${ROCMFPX_COMMIT_HASH}"
-        
         rocm_version="${DETECTED_ROCM_VERSION:-${{ env.ROCM_VERSION }}}"
         echo "rocm_version=$rocm_version" >> $GITHUB_OUTPUT
         echo "rocmfpx_commit_hash=${ROCMFPX_COMMIT_HASH}" >> $GITHUB_OUTPUT
-        
-        echo "Final rocm_version: $rocm_version"
-        echo "Final rocmfpx_commit_hash: ${ROCMFPX_COMMIT_HASH}"
         
     - name: Create release summary
       run: |
@@ -730,9 +574,6 @@ jobs:
         - **ROCmFPX Commit Hash**: ${{ env.ROCMFPX_COMMIT_HASH }}
         - **Build Type**: Release
         - **Platform**: Ubuntu
-        
-        ## Build Artifacts
-        The compiled binaries are available in the build artifacts.
         EOF
         
     - name: Upload build summary
@@ -743,23 +584,13 @@ jobs:
         path: build-summary-ubuntu-${{ matrix.gfx_target }}.md
         retention-days: 30
         
-    - name: Clean up build artifacts and temporary files
+    - name: Clean up workspace
       if: always()
       run: |
-        echo "Starting cleanup process..."
-        if [ -f "rocm.tar.gz" ]; then
-          rm -f rocm.tar.gz
-        fi
-        if [ -d "/opt/rocm" ]; then
-          sudo rm -rf /opt/rocm
-        fi
-        if [ -d "ROCmFPX" ]; then
-          rm -rf ROCmFPX
-        fi
-        if [ -f "build-summary-ubuntu-${{ matrix.gfx_target }}.md" ]; then
-          rm -f "build-summary-ubuntu-${{ matrix.gfx_target }}.md"
-        fi
-        echo "Cleanup completed successfully"
+        if [ -f "rocm.tar.gz" ]; then rm -f rocm.tar.gz; fi
+        if [ -d "/opt/rocm" ]; then sudo rm -rf /opt/rocm; fi
+        if [ -d "ROCmFPX" ]; then rm -rf ROCmFPX; fi
+        if [ -f "build-summary-ubuntu-${{ matrix.gfx_target }}.md" ]; then rm -f "build-summary-ubuntu-${{ matrix.gfx_target }}.md"; fi
 
   test-stx-halo:
     runs-on: ${{ matrix.runner }}
@@ -853,13 +684,10 @@ jobs:
         
         if [ -z "$existing_tags" ]; then
           next_number=1000
-          echo "No existing sequential release tags found, starting with b1000"
         else
           highest_tag=$(echo "$existing_tags" | tail -n 1)
           highest_number=$(echo "$highest_tag" | sed 's/^b//')
           next_number=$((highest_number + 1))
-          echo "Highest existing tag: $highest_tag (number: $highest_number)"
-          echo "Next number will be: $next_number"
         fi
         
         TAG=$(printf "b%04d" $next_number)
@@ -885,10 +713,6 @@ jobs:
         operating_systems="${{ env.OPERATING_SYSTEMS }}"
         TAG="${{ steps.generate-tag.outputs.tag }}"
         
-        echo "Processing targets: $targets"
-        echo "Processing operating systems: $operating_systems"
-        echo "Using release tag: $TAG"
-        
         IFS=',' read -ra TARGET_ARRAY <<< "$targets"
         IFS=',' read -ra OS_ARRAY <<< "$operating_systems"
         
@@ -897,25 +721,19 @@ jobs:
           for target in "${TARGET_ARRAY[@]}"; do
             target=$(echo "$target" | xargs)
             
-            echo "Processing OS: $os, target: $target"
             artifact_name="rocmfpx-${os}-rocm-${target}-x64"
             artifact_dir="./all-artifacts/${artifact_name}"
             final_archive_name="rocmfpx-${TAG}-${os}-rocm-${target}-x64"
             
             if [ -d "$artifact_dir" ]; then
-              echo "Creating archive: ${final_archive_name}.zip"
               cd "$artifact_dir"
               zip -r "../../${final_archive_name}.zip" *
               cd ../../
             else
               echo "Warning: Artifact directory not found: $artifact_dir"
-              ls -la ./all-artifacts/
             fi
           done
         done
-        
-        echo "Created archives:"
-        ls -la *.zip
         
     - name: Create Release
       if: steps.check-tag.outputs.tag_exists == 'false'
@@ -927,12 +745,6 @@ jobs:
         ROCMFPX_COMMIT_HASH="${{ needs.build-windows.outputs.rocmfpx_commit_hash || needs.build-ubuntu.outputs.rocmfpx_commit_hash }}"
         targets="${{ env.GFX_TARGETS }}"
         operating_systems="${{ env.OPERATING_SYSTEMS }}"
-        
-        echo "Creating release with tag: $TAG"
-        echo "GPU Targets: $targets"
-        echo "Operating Systems: $operating_systems"
-        echo "ROCm Version: $ROCM_VERSION"
-        echo "ROCmFPX Commit: $ROCMFPX_COMMIT_HASH"
         
         upload_files=""
         IFS=',' read -ra TARGET_ARRAY <<< "$targets"
@@ -949,8 +761,6 @@ jobs:
             fi
           done
         done
-        
-        echo "Files to upload: $upload_files"
         
         gh release create "$TAG" \
           --title "ROCmFPX $TAG" \
