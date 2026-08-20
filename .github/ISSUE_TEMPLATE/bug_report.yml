@@ -1,0 +1,92 @@
+name: Bug Report on ROCmFPX + ROCm builds
+description: Report an issue specific to running ROCmFPX with ROCm builds
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report an issue! Please fill in the details below so we can help you as quickly as possible.
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      description: Which OS are you running?
+      options:
+        - Windows 10
+        - Windows 11
+        - Ubuntu 22.04
+        - Ubuntu 24.04
+        - Fedora
+        - Arch Linux
+        - Other Linux (specify below)
+    validations:
+      required: true
+
+  - type: input
+    id: os-other
+    attributes:
+      label: OS Details (if "Other" or additional info)
+      description: Kernel version, distro version, or any other relevant OS details.
+      placeholder: e.g. Debian 12, kernel 6.1
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU Model
+      description: Which AMD GPU are you using?
+      placeholder: e.g. Radeon 8060S (Strix Halo), Ryzen AI 300 (Strix Point), RX 7900 XTX, RX 6800 XT, MI210
+    validations:
+      required: true
+
+  - type: input
+    id: build-version
+    attributes:
+      label: ROCmFPX Build Version
+      description: Which release tag or build did you use? Check the releases page.
+      placeholder: e.g. b1000
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model Used
+      description: Provide the Hugging Face link or checkpoint/GGUF filename.
+      placeholder: e.g. Ornith1.0-35b-CIRU-DUALVIEW-FPX7+Q8-MTP.gguf or Qwen3.8-27B-CIRU-ActiveFPX-PromptForge.gguf
+    validations:
+      required: true
+
+  - type: dropdown
+    id: quant-format
+    attributes:
+      label: Quantization Format
+      description: Which ROCmFPX format are you running?
+      options:
+        - Q2_0_ROCMFPX
+        - Q3_0_ROCMFPX
+        - Q4_0_ROCMFP4 / FAST
+        - Q6_0_ROCMFPX
+        - Q7_0_ROCMFPX (DualView)
+        - Q8_0_ROCMFPX
+        - Standard GGUF (e.g. Q4_K_M, Q8_0, BF16)
+        - Other / Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Issue Description
+      description: Describe what happened and what you expected to happen.
+      placeholder: When I run ... I get ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-info
+    attributes:
+      label: Additional Information
+      description: |
+        Any other context that might help — logs, screenshots, command-line flags, environment variables (e.g. GGML_ROCM_GFX1151_Q7_Q8_VIEW), etc.
+      render: text

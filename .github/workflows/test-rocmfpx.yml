@@ -1,0 +1,322 @@
+name: Test ROCmFPX + ROCm
+on:
+  workflow_dispatch:
+    inputs:
+      operating_systems:
+        description: 'Operating systems to test on (comma-separated: windows,ubuntu)'
+        required: false
+        default: 'windows,ubuntu'
+      gfx_target:
+        description: 'AMD GPU targets (comma-separated)'
+        required: false
+        default: 'gfx1151'
+      release_tag:
+        description: 'Release tag to test (e.g., b1000) or "latest" for the most recent release'
+        required: false
+        default: 'latest'
+
+env:
+  OPERATING_SYSTEMS: ${{ github.event.inputs.operating_systems || 'windows,ubuntu' }}
+  GFX_TARGETS: ${{ github.event.inputs.gfx_target || 'gfx1151' }}
+  RELEASE_TAG: ${{ github.event.inputs.release_tag || 'latest' }}
+
+jobs:
+  prepare-matrix:
+    runs-on: ubuntu-22.04
+    outputs:
+      windows_matrix: ${{ steps.set-matrix.outputs.windows_matrix }}
+      ubuntu_matrix: ${{ steps.set-matrix.outputs.ubuntu_matrix }}
+      should_test_windows: ${{ steps.set-matrix.outputs.should_test_windows }}
+      should_test_ubuntu: ${{ steps.set-matrix.outputs.should_test_ubuntu }}
+      latest_release_tag: ${{ steps.get-release.outputs.latest_release_tag }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Get release tag
+      id: get-release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        release_input="${{ env.RELEASE_TAG }}"
+        
+        if [ "$release_input" = "latest" ]; then
+          release_tag=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/latest" \
+            | jq -r '.tag_name')
+          echo "Using latest release: $release_tag"
+        else
+          release_tag="$release_input"
+          echo "Using specified release: $release_tag"
+          
+          response_code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$release_tag")
+          
+          if [ "$response_code" != "200" ]; then
+            echo "Error: Release '$release_tag' does not exist (HTTP $response_code)"
+            exit 1
+          fi
+        fi
+        
+        echo "latest_release_tag=$release_tag" >> $GITHUB_OUTPUT
+        echo "Final release tag: $release_tag"
+        
+    - name: Set matrix
+      id: set-matrix
+      run: |
+        targets="${{ env.GFX_TARGETS }}"
+        operating_systems="${{ env.OPERATING_SYSTEMS }}"
+        
+        echo "Input targets: $targets"
+        echo "Input operating systems: $operating_systems"
+
+        matrix_targets=$(echo "$targets" \
+          | tr ',' '\n' \
+          | sed 's/^ *//;s/ *$//' \
+          | sed 's/^"//;s/"$//' \
+          | jq -R . \
+          | jq -s '{gfx_target: .}' \
+          | jq -c)
+
+        should_test_windows="false"
+        should_test_ubuntu="false"
+        
+        if [[ "$operating_systems" == *"windows"* ]]; then
+          should_test_windows="true"
+          echo "windows_matrix=$matrix_targets" >> $GITHUB_OUTPUT
+        fi
+        
+        if [[ "$operating_systems" == *"ubuntu"* ]]; then
+          should_test_ubuntu="true"
+          echo "ubuntu_matrix=$matrix_targets" >> $GITHUB_OUTPUT
+        fi
+        
+        echo "should_test_windows=$should_test_windows" >> $GITHUB_OUTPUT
+        echo "should_test_ubuntu=$should_test_ubuntu" >> $GITHUB_OUTPUT
+        
+        echo "Windows test: $should_test_windows"
+        echo "Ubuntu test: $should_test_ubuntu"
+        echo "Generated matrix: $matrix_targets"
+
+  test-windows:
+    runs-on: [stx-halo, Windows]
+    needs: prepare-matrix
+    if: needs.prepare-matrix.outputs.should_test_windows == 'true'
+    strategy:
+      matrix: ${{fromJson(needs.prepare-matrix.outputs.windows_matrix)}}
+      fail-fast: false
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Download release artifacts
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        $releaseTag = "${{ needs.prepare-matrix.outputs.latest_release_tag }}"
+        $target = "${{ matrix.gfx_target }}"
+        $assetName = "rocmfpx-${releaseTag}-windows-rocm-${target}-x64.zip"
+        $repo = "${{ github.repository }}"
+        
+        Write-Host "Downloading release asset: $assetName"
+        Write-Host "From release: $releaseTag"
+        
+        $headers = @{ "Authorization" = "token $env:GITHUB_TOKEN" }
+        $releaseUrl = "https://api.github.com/repos/$repo/releases/tags/$releaseTag"
+        
+        try {
+          $release = Invoke-RestMethod -Uri $releaseUrl -Headers $headers
+          $asset = $release.assets | Where-Object { $_.name -eq $assetName }
+          
+          if (-not $asset) {
+            Write-Error "Asset '$assetName' not found in release '$releaseTag'"
+            exit 1
+          }
+          
+          Write-Host "Found asset: $($asset.name) (Size: $($asset.size) bytes)"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $assetName -Headers $headers
+          Write-Host "Downloaded $assetName successfully"
+        }
+        catch {
+          Write-Error "Failed to download release asset: $_"
+          exit 1
+        }
+        
+        Write-Host "Extracting $assetName..."
+        Expand-Archive -Path $assetName -DestinationPath "rocmfpx-binaries" -Force
+        
+        Write-Host "Contents of rocmfpx-binaries:"
+        Get-ChildItem -Recurse "rocmfpx-binaries" | Format-Table Name, Length
+        
+    - name: Download test model
+      run: |
+        $modelUrl = "https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true"
+        $modelPath = "Qwen3-0.6B-Q4_0.gguf"
+        
+        Write-Host "Downloading test model from: $modelUrl"
+        curl.exe -L -o $modelPath $modelUrl
+        
+        if (Test-Path $modelPath) {
+          $fileSize = (Get-Item $modelPath).Length
+          Write-Host "Model downloaded successfully. Size: $fileSize bytes"
+        } else {
+          Write-Error "Failed to download model"
+          exit 1
+        }
+        
+    - name: Run llama-cli test
+      run: |
+        $llamaCliPath = "rocmfpx-binaries\llama-cli.exe"
+        $modelPath = "Qwen3-0.6B-Q4_0.gguf"
+        
+        if (-not (Test-Path $llamaCliPath)) {
+          Write-Error "llama-cli.exe not found at: $llamaCliPath"
+          Get-ChildItem -Recurse "rocmfpx-binaries"
+          exit 1
+        }
+        
+        Write-Host "Running llama-cli test..."
+        try {
+          $process = Start-Process -FilePath $llamaCliPath -ArgumentList @("-m", "`"$modelPath`"", "-ngl", "99", "-p", "`"I believe the meaning of life is`"", "-st") -NoNewWindow -Wait -PassThru -RedirectStandardOutput "stdout.txt" -RedirectStandardError "stderr.txt"
+          $process.WaitForExit()
+          
+          $stdout = Get-Content "stdout.txt" -Raw -ErrorAction SilentlyContinue
+          $stderr = Get-Content "stderr.txt" -Raw -ErrorAction SilentlyContinue
+          $output = $stdout + $stderr
+          
+          Remove-Item "stdout.txt" -ErrorAction SilentlyContinue
+          Remove-Item "stderr.txt" -ErrorAction SilentlyContinue
+        }
+        catch {
+          Write-Error "Failed to run llama-cli: $_"
+          exit 1
+        }
+        
+        Write-Host "=== LLAMA-CLI OUTPUT ==="
+        Write-Host $output
+        Write-Host "=== END OUTPUT ==="
+        
+        if ($process.ExitCode -ne 0) {
+          Write-Host "❌ llama-cli exited with error code: $($process.ExitCode)"
+          exit 1
+        }
+        
+        $foundGpuOffload = $output -match "offloaded 29/29 layers to GPU"
+        $foundThinkTag = $output -match "</think>"
+        
+        Write-Host "=== TEST RESULTS ==="
+        Write-Host "Expected 'offloaded 29/29 layers to GPU': $(if ($foundGpuOffload) { 'FOUND' } else { 'NOT FOUND' })"
+        Write-Host "Expected '</think>' tag: $(if ($foundThinkTag) { 'FOUND' } else { 'NOT FOUND' })"
+        
+        if ($foundGpuOffload -and $foundThinkTag) {
+          Write-Host "✅ Test PASSED"
+        } else {
+          Write-Host "❌ Test FAILED - Missing expected outputs"
+          exit 1
+        }
+
+  test-ubuntu:
+    runs-on: [stx-halo, Linux]
+    needs: prepare-matrix
+    if: needs.prepare-matrix.outputs.should_test_ubuntu == 'true'
+    strategy:
+      matrix: ${{fromJson(needs.prepare-matrix.outputs.ubuntu_matrix)}}
+      fail-fast: false
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install jq
+      run: |
+        if ! command -v jq &> /dev/null; then
+          echo "Installing jq..."
+          mkdir -p ~/bin
+          curl -L -o ~/bin/jq https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64
+          chmod +x ~/bin/jq
+          export PATH="$HOME/bin:$PATH"
+          echo "PATH=$HOME/bin:$PATH" >> $GITHUB_ENV
+        fi
+        
+    - name: Download release artifacts
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        release_tag="${{ needs.prepare-matrix.outputs.latest_release_tag }}"
+        target="${{ matrix.gfx_target }}"
+        asset_name="rocmfpx-${release_tag}-ubuntu-rocm-${target}-x64.zip"
+        repo="${{ github.repository }}"
+        
+        echo "Downloading release asset: $asset_name"
+        echo "From release: $release_tag"
+        
+        release_url="https://api.github.com/repos/$repo/releases/tags/$release_tag"
+        release_data=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$release_url")
+        
+        download_url=$(echo "$release_data" | jq -r ".assets[] | select(.name == \"$asset_name\") | .browser_download_url")
+        
+        if [ "$download_url" = "null" ] || [ -z "$download_url" ]; then
+          echo "Error: Asset '$asset_name' not found in release '$release_tag'"
+          exit 1
+        fi
+        
+        curl -L -H "Authorization: token $GITHUB_TOKEN" -o "$asset_name" "$download_url"
+        unzip -q "$asset_name" -d rocmfpx-binaries
+        
+        echo "Contents of rocmfpx-binaries:"
+        find rocmfpx-binaries -type f -exec ls -la {} \;
+        
+    - name: Download test model
+      run: |
+        model_url="https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true"
+        model_path="Qwen3-0.6B-Q4_0.gguf"
+        
+        curl -L -o "$model_path" "$model_url"
+        
+    - name: Set up library path
+      run: |
+        echo "LD_LIBRARY_PATH=$(pwd)/rocmfpx-binaries:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+        
+    - name: Run llama-cli test
+      run: |
+        llama_cli_path="./rocmfpx-binaries/llama-cli"
+        model_path="Qwen3-0.6B-Q4_0.gguf"
+        
+        chmod +x "$llama_cli_path"
+        
+        if [ ! -f "$llama_cli_path" ]; then
+          echo "llama-cli not found at: $llama_cli_path"
+          exit 1
+        fi
+        
+        echo "Running llama-cli test..."
+        output=$("$llama_cli_path" -m "$model_path" -ngl 99 -p "I believe the meaning of life is" -st 2>&1)
+        
+        echo "=== LLAMA-CLI OUTPUT ==="
+        echo "$output"
+        echo "=== END OUTPUT ==="
+        
+        if echo "$output" | grep -q "offloaded 29/29 layers to GPU"; then
+          found_gpu_offload=true
+        else
+          found_gpu_offload=false
+        fi
+        
+        if echo "$output" | grep -q "</think>"; then
+          found_think_tag=true
+        else
+          found_think_tag=false
+        fi
+        
+        echo "=== TEST RESULTS ==="
+        echo "Expected 'offloaded 29/29 layers to GPU': $(if [ "$found_gpu_offload" = true ]; then echo 'FOUND'; else echo 'NOT FOUND'; fi)"
+        echo "Expected '</think>' tag: $(if [ "$found_think_tag" = true ]; then echo 'FOUND'; else echo 'NOT FOUND'; fi)"
+        
+        if [ "$found_gpu_offload" = true ] && [ "$found_think_tag" = true ]; then
+          echo "✅ Test PASSED"
+        else
+          echo "❌ Test FAILED - Missing expected outputs"
+          exit 1
+        fi

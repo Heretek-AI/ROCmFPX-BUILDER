@@ -1,0 +1,39 @@
+# Build directories and artifacts
+build/
+build-*/
+*.zip
+*.tar.gz
+*.tar
+rocm.tar.gz
+all-artifacts/
+rocmfpx-binaries/
+llama-binaries/
+llama.cpp/
+ROCmFPX/
+llamacpp-rocm/
+
+# Model files and weights
+*.gguf
+*.bin
+
+# Log files and temporary command outputs
+*.log
+stdout.txt
+stderr.txt
+vs_path.txt
+build-summary-*.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Environment / database
+mitm_mcp_traffic.db
+.env
+
+# OS-specific
+.DS_Store
+Thumbs.db

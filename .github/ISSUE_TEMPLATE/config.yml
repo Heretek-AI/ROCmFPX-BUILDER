@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: ROCmFPX Upstream Repo
+    url: https://github.com/ciru-ai/ROCmFPX
+    about: For questions and issues with ROCmFPX core formats, kernels, and quantization logic.
+  - name: TheRock ROCm SDK
+    url: https://github.com/ROCm/TheRock
+    about: For questions and issues related to AMD ROCm TheRock nightly builds.
