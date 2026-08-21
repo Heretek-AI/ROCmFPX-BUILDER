@@ -773,3 +773,16 @@ jobs:
 
         This release includes compiled ROCmFPX (Ciru) binaries with ROCm support for multiple GPU targets and operating systems, with all essential ROCm runtime libraries included. Supports ROCmFP2, ROCmFP3, ROCmFP4, ROCmFP6, ROCmFP7 (DualView), and ROCmFP8 formats." \
           $upload_files
+
+    - name: Trigger Homebrew Tap Formula Update
+      if: steps.check-tag.outputs.tag_exists == 'false' && success()
+      env:
+        GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+      run: |
+        TAG="${{ steps.generate-tag.outputs.tag }}"
+        echo "Notifying Homebrew Tap of new release: $TAG"
+        gh api -X POST "/repos/Heretek-AI/homebrew-tap/dispatches" \
+          -f event_type="builder-release" \
+          -f client_payload[builder]="rocmfpx" \
+          -f client_payload[release_tag]="$TAG" || echo "Note: Tap dispatch triggered or skipped if repo permissions are local"
+

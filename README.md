@@ -99,6 +99,29 @@ llama-quantize source-model-BF16.gguf output-model-FP7.gguf Q7_0_ROCMFPX
 
 ## 🧪 Quick Smoketest & Usage
 
+### 🍺 Homebrew Installation (Linux)
+
+Install pre-compiled ROCmFPX with embedded ROCm 7 runtime libraries via Homebrew:
+
+```bash
+# 1. Tap the Heretek-AI repository
+brew tap Heretek-AI/tap
+
+# 2. Install ROCmFPX (defaults to AMD Strix Halo gfx1151):
+brew install rocmfpx
+
+# Or install for your specific GPU architecture:
+brew install rocmfpx --with-gfx1150  # AMD Strix Point (Radeon 890M)
+brew install rocmfpx --with-gfx120X  # AMD RDNA4 (RX 9070 XT)
+brew install rocmfpx --with-gfx110X  # AMD RDNA3 (RX 7900, Radeon 780M)
+brew install rocmfpx --with-gfx103X  # AMD RDNA2 / Steam Deck
+
+# 3. Optional: Run background OpenAI-compatible server daemon:
+brew services start rocmfpx
+```
+
+### Manual Download & Extraction
+
 1. **Download** the zip archive matching your GPU from [Releases](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest).
 2. **Extract** the archive to any directory.
 3. **Run `llama-server` or `llama-cli`**:
