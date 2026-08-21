@@ -316,7 +316,8 @@ jobs:
           exit 1
         }
         Write-Host "Testing llama-cli.exe --help..."
-        & $llamaCli --help | Select-Object -First 10
+        $helpText = & $llamaCli --help 2>&1
+        $helpText | Select-Object -First 10 | Out-Host
         Write-Host "Windows binary verification successful!"
 
     - name: List build artifacts
