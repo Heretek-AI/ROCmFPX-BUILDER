@@ -7,7 +7,7 @@ on:
         required: false
         default: 'windows,ubuntu'
       gfx_target:
-        description: 'AMD GPU targets (comma-separated)'
+        description: 'AMD GPU targets (comma-separated; use "multiarch" for a single combined gfx1100+gfx1151 binary)'
         required: false
         default: 'gfx1151,gfx1150,gfx120X,gfx110X,gfx103X,gfx90a,gfx908'
       rocm_version:
@@ -87,9 +87,10 @@ jobs:
 
   build-windows:
     # Pinned to windows-2022 (MSVC 14.4x) to avoid <cmath> constexpr conflicts in MSVC 14.51+
+    # multiarch is a Linux-only combined target (single fatbin for gfx1100+gfx1151)
     runs-on: windows-2022
     needs: prepare-matrix
-    if: needs.prepare-matrix.outputs.should_build_windows == 'true'
+    if: needs.prepare-matrix.outputs.should_build_windows == 'true' && matrix.gfx_target != 'multiarch'
     strategy:
       matrix: ${{fromJson(needs.prepare-matrix.outputs.windows_matrix)}}
       fail-fast: false
@@ -482,6 +483,9 @@ jobs:
           mapped_target="gfx1030;gfx1031;gfx1032;gfx1034"
         elif [ "$current_target" = "gfx1151" ]; then
           mapped_target="gfx1151"
+        elif [ "$current_target" = "multiarch" ]; then
+          # Combined fatbin: HIP runtime picks gfx1100 or gfx1151 code object at load
+          mapped_target="gfx1100;gfx1151"
         elif [ "$current_target" = "gfx1150" ]; then
           mapped_target="gfx1150"
         elif [ "$current_target" = "gfx120X" ]; then
@@ -559,6 +563,17 @@ jobs:
         cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_drm.so* "$build_bin_path/" 2>/dev/null || true
         cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_drm_amdgpu.so* "$build_bin_path/" 2>/dev/null || true
         cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_bz2.so* "$build_bin_path/" 2>/dev/null || true
+
+        # Multiarch dist: per-architecture kernel packs live in /opt/rocm/.kpack
+        # (legacy family dists keep them under lib/*/library instead). Ship only the
+        # packs matching the combined build targets.
+        kpack_src="/opt/rocm/.kpack"
+        if [ -d "$kpack_src" ]; then
+          mkdir -p "$build_bin_path/.kpack"
+          ls "$kpack_src" || true
+          cp -v "$kpack_src"/*_gfx1100.kpack "$build_bin_path/.kpack/" 2>/dev/null || true
+          cp -v "$kpack_src"/*_gfx1151.kpack "$build_bin_path/.kpack/" 2>/dev/null || true
+        fi
 
     - name: Set RPATH for portable distribution
       run: |
