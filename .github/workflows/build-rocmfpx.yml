@@ -790,7 +790,9 @@ jobs:
             
             if [ -d "$artifact_dir" ]; then
               cd "$artifact_dir"
-              # Restore rocm_kpack's hidden-dir geometry (see multiarch staging)
+              # Restore rocm_kpack's hidden-dir geometry (see multiarch staging);
+              # dotglob so the zip glob also picks up the now-hidden .kpack/
+              shopt -s dotglob
               [ -d kpacks ] && mv kpacks .kpack
               zip -r "../../${final_archive_name}.zip" *
               cd ../../
