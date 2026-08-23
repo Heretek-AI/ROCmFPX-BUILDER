@@ -590,13 +590,14 @@ jobs:
       run: |
         # rocm_kpack resolves each host library's embedded "../.kpack/<name>_@GFXARCH@.kpack"
         # relative to that library, so kernel packs must be a SIBLING of bin/
-        # (mirrors TheRock's install/lib + install/.kpack geometry). Staging also
-        # sidesteps upload-artifact dropping hidden directories from plain paths.
-        mkdir -p ROCmFPX/dist/bin ROCmFPX/dist/.kpack
+        # (mirrors TheRock's install/lib + install/.kpack geometry). Packs are
+        # staged under a visible name because upload-artifact drops hidden
+        # entries; the release step renames kpacks/ -> .kpack/ before zipping.
+        mkdir -p ROCmFPX/dist/bin ROCmFPX/dist/kpacks
         cp -a ROCmFPX/build/bin/. ROCmFPX/dist/bin/
         ls /opt/rocm/.kpack || true
-        cp -v /opt/rocm/.kpack/*_gfx1100.kpack ROCmFPX/dist/.kpack/ 2>/dev/null || true
-        cp -v /opt/rocm/.kpack/*_gfx1151.kpack ROCmFPX/dist/.kpack/ 2>/dev/null || true
+        cp -v /opt/rocm/.kpack/*_gfx1100.kpack ROCmFPX/dist/kpacks/ 2>/dev/null || true
+        cp -v /opt/rocm/.kpack/*_gfx1151.kpack ROCmFPX/dist/kpacks/ 2>/dev/null || true
 
     - name: Verify Linux Binaries and Dependencies
       run: |
@@ -611,9 +612,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: rocmfpx-ubuntu-rocm-${{ matrix.gfx_target }}-x64
-        # The hidden .kpack/ directory must be matched explicitly — globs skip
-        # dot-paths, and plain directory paths drop hidden entries entirely
-        path: ${{ matrix.gfx_target == 'multiarch' && fromJSON('["ROCmFPX/dist/bin/**", "ROCmFPX/dist/.kpack/**"]') || 'ROCmFPX/build/bin/' }}
+        # multiarch uploads the staged dist tree (bin/ + kpacks/, see the
+        # staging step); the release workflow renames kpacks/ -> .kpack/
+        path: ${{ matrix.gfx_target == 'multiarch' && 'ROCmFPX/dist/**' || 'ROCmFPX/build/bin/' }}
         retention-days: 30
         
     - name: Set job outputs
@@ -789,6 +790,8 @@ jobs:
             
             if [ -d "$artifact_dir" ]; then
               cd "$artifact_dir"
+              # Restore rocm_kpack's hidden-dir geometry (see multiarch staging)
+              [ -d kpacks ] && mv kpacks .kpack
               zip -r "../../${final_archive_name}.zip" *
               cd ../../
             else
