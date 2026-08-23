@@ -67,10 +67,14 @@ jobs:
 
         should_build_windows="false"
         should_build_ubuntu="false"
-        
-        if [[ "$operating_systems" == *"windows"* ]]; then
+
+        # multiarch is a Linux-only combined target (gfx1100+gfx1151 fatbin);
+        # drop it from the Windows matrix so the Windows job never picks it up.
+        windows_matrix=$(echo "$matrix_targets" | jq -c '{gfx_target: [.gfx_target[] | select(. != "multiarch")]}')
+
+        if [[ "$operating_systems" == *"windows"* && "$windows_matrix" != '{"gfx_target":[]}' ]]; then
           should_build_windows="true"
-          echo "windows_matrix=$matrix_targets" >> $GITHUB_OUTPUT
+          echo "windows_matrix=$windows_matrix" >> $GITHUB_OUTPUT
         fi
         
         if [[ "$operating_systems" == *"ubuntu"* ]]; then
@@ -87,10 +91,9 @@ jobs:
 
   build-windows:
     # Pinned to windows-2022 (MSVC 14.4x) to avoid <cmath> constexpr conflicts in MSVC 14.51+
-    # multiarch is a Linux-only combined target (single fatbin for gfx1100+gfx1151)
     runs-on: windows-2022
     needs: prepare-matrix
-    if: needs.prepare-matrix.outputs.should_build_windows == 'true' && matrix.gfx_target != 'multiarch'
+    if: needs.prepare-matrix.outputs.should_build_windows == 'true'
     strategy:
       matrix: ${{fromJson(needs.prepare-matrix.outputs.windows_matrix)}}
       fail-fast: false
