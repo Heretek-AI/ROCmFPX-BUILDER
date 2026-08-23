@@ -611,8 +611,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: rocmfpx-ubuntu-rocm-${{ matrix.gfx_target }}-x64
-        # Wildcard so upload-artifact keeps the hidden .kpack/ directory
-        path: ${{ matrix.gfx_target == 'multiarch' && 'ROCmFPX/dist/**' || 'ROCmFPX/build/bin/' }}
+        # The hidden .kpack/ directory must be matched explicitly — globs skip
+        # dot-paths, and plain directory paths drop hidden entries entirely
+        path: ${{ matrix.gfx_target == 'multiarch' && fromJSON('["ROCmFPX/dist/bin/**", "ROCmFPX/dist/.kpack/**"]') || 'ROCmFPX/build/bin/' }}
         retention-days: 30
         
     - name: Set job outputs
