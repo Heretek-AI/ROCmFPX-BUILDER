@@ -526,22 +526,26 @@ jobs:
     - name: Copy ROCm core libs to build directory
       run: |
         build_bin_path="ROCmFPX/build/bin"
-        
-        # Copy BLAS kernel folders
-        rocblas_lib_path="/opt/rocm/lib/rocblas/library"
-        if [ -d "$rocblas_lib_path" ]; then
-          dest_rocblas_path="$build_bin_path/rocblas/library"
-          mkdir -p "$(dirname "$dest_rocblas_path")"
-          cp -r "$rocblas_lib_path" "$(dirname "$dest_rocblas_path")/"
+        current_target="${{ matrix.gfx_target }}"
+
+        # Copy BLAS kernel folders. Skipped for multiarch: those trees hold every
+        # architecture's kernels (~3 GB); the filtered .kpack packs supply them.
+        if [ "$current_target" != "multiarch" ]; then
+          rocblas_lib_path="/opt/rocm/lib/rocblas/library"
+          if [ -d "$rocblas_lib_path" ]; then
+            dest_rocblas_path="$build_bin_path/rocblas/library"
+            mkdir -p "$(dirname "$dest_rocblas_path")"
+            cp -r "$rocblas_lib_path" "$(dirname "$dest_rocblas_path")/"
+          fi
+
+          hipblaslt_lib_path="/opt/rocm/lib/hipblaslt/library"
+          if [ -d "$hipblaslt_lib_path" ]; then
+            dest_hipblaslt_path="$build_bin_path/hipblaslt/library"
+            mkdir -p "$(dirname "$dest_hipblaslt_path")"
+            cp -r "$hipblaslt_lib_path" "$(dirname "$dest_hipblaslt_path")/"
+          fi
         fi
 
-        hipblaslt_lib_path="/opt/rocm/lib/hipblaslt/library"
-        if [ -d "$hipblaslt_lib_path" ]; then
-          dest_hipblaslt_path="$build_bin_path/hipblaslt/library"
-          mkdir -p "$(dirname "$dest_hipblaslt_path")"
-          cp -r "$hipblaslt_lib_path" "$(dirname "$dest_hipblaslt_path")/"
-        fi
- 
         # Copy required ROCm dynamic shared libraries
         cp -v /opt/rocm/lib/libhipblas.so* "$build_bin_path/" 2>/dev/null || true
         cp -v /opt/rocm/lib/librocblas.so* "$build_bin_path/" 2>/dev/null || true
@@ -560,23 +564,17 @@ jobs:
         cp -v /opt/rocm/lib/librocm_kpack.so* "$build_bin_path/" 2>/dev/null || true
         cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_z.so* "$build_bin_path/" 2>/dev/null || true
         cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_zstd.so* "$build_bin_path/" 2>/dev/null || true
-        cp -v /opt/rocm/lib/llvm/lib/libLLVM.so* "$build_bin_path/" 2>/dev/null || true
-        cp -v /opt/rocm/lib/llvm/lib/libclang-cpp.so* "$build_bin_path/" 2>/dev/null || true
+        # LLVM/clang-cpp are compiler-only; inference never loads them.
+        if [ "$current_target" != "multiarch" ]; then
+          cp -v /opt/rocm/lib/llvm/lib/libLLVM.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/llvm/lib/libclang-cpp.so* "$build_bin_path/" 2>/dev/null || true
+        fi
         cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_elf.so* "$build_bin_path/" 2>/dev/null || true
         cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_drm.so* "$build_bin_path/" 2>/dev/null || true
         cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_drm_amdgpu.so* "$build_bin_path/" 2>/dev/null || true
         cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_bz2.so* "$build_bin_path/" 2>/dev/null || true
 
-        # Multiarch dist: per-architecture kernel packs live in /opt/rocm/.kpack
-        # (legacy family dists keep them under lib/*/library instead). Ship only the
-        # packs matching the combined build targets.
-        kpack_src="/opt/rocm/.kpack"
-        if [ -d "$kpack_src" ]; then
-          mkdir -p "$build_bin_path/.kpack"
-          ls "$kpack_src" || true
-          cp -v "$kpack_src"/*_gfx1100.kpack "$build_bin_path/.kpack/" 2>/dev/null || true
-          cp -v "$kpack_src"/*_gfx1151.kpack "$build_bin_path/.kpack/" 2>/dev/null || true
-        fi
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_bz2.so* "$build_bin_path/" 2>/dev/null || true
 
     - name: Set RPATH for portable distribution
       run: |
@@ -585,6 +583,20 @@ jobs:
         for file in *.so* llama-*; do
           [ -f "$file" ] && [ ! -L "$file" ] && patchelf --set-rpath '$ORIGIN' "$file" 2>/dev/null || true
         done
+
+    - name: Stage multiarch distribution layout
+      id: stage-dist
+      if: matrix.gfx_target == 'multiarch'
+      run: |
+        # rocm_kpack resolves each host library's embedded "../.kpack/<name>_@GFXARCH@.kpack"
+        # relative to that library, so kernel packs must be a SIBLING of bin/
+        # (mirrors TheRock's install/lib + install/.kpack geometry). Staging also
+        # sidesteps upload-artifact dropping hidden directories from plain paths.
+        mkdir -p ROCmFPX/dist/bin ROCmFPX/dist/.kpack
+        cp -a ROCmFPX/build/bin/. ROCmFPX/dist/bin/
+        ls /opt/rocm/.kpack || true
+        cp -v /opt/rocm/.kpack/*_gfx1100.kpack ROCmFPX/dist/.kpack/ 2>/dev/null || true
+        cp -v /opt/rocm/.kpack/*_gfx1151.kpack ROCmFPX/dist/.kpack/ 2>/dev/null || true
 
     - name: Verify Linux Binaries and Dependencies
       run: |
@@ -599,7 +611,8 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: rocmfpx-ubuntu-rocm-${{ matrix.gfx_target }}-x64
-        path: ROCmFPX/build/bin/
+        # Wildcard so upload-artifact keeps the hidden .kpack/ directory
+        path: ${{ matrix.gfx_target == 'multiarch' && 'ROCmFPX/dist/**' || 'ROCmFPX/build/bin/' }}
         retention-days: 30
         
     - name: Set job outputs
