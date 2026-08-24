@@ -149,21 +149,21 @@ jobs:
         git log --oneline -1
 
     - name: Prepare Composable Kernel
-      working-directory: ROCmFPX
+      working-directory: ${{ github.workspace }}/ROCmFPX
       run: |
-        git clone https://github.com/ROCm/composable_kernel.git ../composable_kernel
-        git -C ../composable_kernel checkout "${{ env.CK_COMMIT }}"
+        git clone https://github.com/ROCm/composable_kernel.git "${{ github.workspace }}/composable_kernel"
+        git -C "${{ github.workspace }}/composable_kernel" checkout "${{ env.CK_COMMIT }}"
 
         if [ "${{ env.PROFILE }}" = "kairic-edge" ]; then
-          patch="patches/composable-kernel-gfx1151-iu4.patch"
+          patch="${{ github.workspace }}/ROCmFPX/patches/composable-kernel-gfx1151-iu4.patch"
           expected="ea57bca3793d35d884fc156b6c0bc33d8e672e3bb49f66ff67338503029d6af5"
           actual=$(sha256sum "$patch" | cut -d' ' -f1)
           if [ "$actual" != "$expected" ]; then
             echo "CK patch hash mismatch: $actual" >&2
             exit 1
           fi
-          git -C ../composable_kernel apply "$patch"
-          git -C ../composable_kernel diff --check
+          git -C "${{ github.workspace }}/composable_kernel" apply "$patch"
+          git -C "${{ github.workspace }}/composable_kernel" diff --check
           echo "Composable Kernel patched for Kairic Edge IU4"
         fi
 
