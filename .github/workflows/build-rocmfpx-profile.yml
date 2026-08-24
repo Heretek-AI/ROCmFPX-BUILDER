@@ -1,0 +1,445 @@
+name: Build ROCmFPX Certified Profiles
+
+# On-demand builds of Ciru's model-specific certified releases. These are
+# frozen branches with pinned toolchains and Composable Kernel revisions —
+# not part of the nightly matrix. The accelerated profile routes are
+# qualified on gfx1151 only; other families build the same branch and fall
+# back to its standard guarded execution paths at runtime.
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Certified profile to build'
+        required: true
+        type: choice
+        options:
+          - kairic-edge
+          - promptforge
+        default: 'kairic-edge'
+      gfx_target:
+        description: 'AMD GPU families (comma-separated)'
+        required: false
+        default: 'gfx1151'
+      rocm_version:
+        description: 'TheRock ROCm version (default: 7.15 certification pin)'
+        required: false
+        default: '7.15.0a20260718'
+      rocmfpx_ref:
+        description: 'ROCmFPX ref override (default: profile branch)'
+        required: false
+        default: ''
+      create_release:
+        description: 'Create a GitHub release after successful build'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  PROFILE: ${{ github.event.inputs.profile || 'kairic-edge' }}
+  GFX_TARGETS: ${{ github.event.inputs.gfx_target || 'gfx1151' }}
+  ROCM_VERSION: ${{ github.event.inputs.rocm_version || '7.15.0a20260718' }}
+  # Certified Composable Kernel revision shared by both profile guides
+  CK_COMMIT: fdf4bb7fcc984811cef48ce817d89aac064b984a
+
+jobs:
+  prepare-matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      ubuntu_matrix: ${{ steps.set-matrix.outputs.ubuntu_matrix }}
+    steps:
+    - name: Set matrix
+      id: set-matrix
+      run: |
+        targets="${{ env.GFX_TARGETS }}"
+        matrix_targets=$(echo "$targets" \
+          | tr ',' '\n' \
+          | sed 's/^ *//;s/ *$//' \
+          | jq -R . \
+          | jq -s '{gfx_target: .}' \
+          | jq -c)
+        echo "ubuntu_matrix=$matrix_targets" >> $GITHUB_OUTPUT
+        echo "Generated matrix: $matrix_targets"
+
+  resolve-ref:
+    runs-on: ubuntu-24.04
+    outputs:
+      rocmfpx_ref: ${{ steps.set-ref.outputs.rocmfpx_ref }}
+    steps:
+    - name: Resolve profile branch
+      id: set-ref
+      run: |
+        override="${{ github.event.inputs.rocmfpx_ref }}"
+        case "${{ env.PROFILE }}" in
+          kairic-edge) branch="release/kairic-edge-qwen38-27b-v1.2" ;;
+          promptforge) branch="qwen3.8-activefpx-promptforge-v2.3" ;;
+          *) echo "Unknown profile" >&2; exit 1 ;;
+        esac
+        ref="${override:-$branch}"
+        echo "rocmfpx_ref=$ref" >> $GITHUB_OUTPUT
+        echo "Building profile '${{ env.PROFILE }}' from ref: $ref"
+
+  build-ubuntu:
+    runs-on: ubuntu-24.04
+    needs: [prepare-matrix, resolve-ref]
+    strategy:
+      matrix: ${{fromJson(needs.prepare-matrix.outputs.ubuntu_matrix)}}
+      fail-fast: false
+    outputs:
+      rocm_version: ${{ steps.set-outputs.outputs.rocm_version }}
+      rocmfpx_commit_hash: ${{ steps.set-outputs.outputs.rocmfpx_commit_hash }}
+
+    steps:
+    - name: Free disk space
+      run: curl -fsSL https://raw.githubusercontent.com/kou/arrow/e49d8ae15583ceff03237571569099a6ad62be32/ci/scripts/util_free_space.sh | bash
+
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Clean up workspace
+      run: |
+        if [ -d "ROCmFPX" ]; then rm -rf ROCmFPX; fi
+        if [ -d "/opt/rocm" ]; then sudo rm -rf /opt/rocm; fi
+        if [ -f "rocm.tar.gz" ]; then rm -f rocm.tar.gz; fi
+
+    - name: Install build dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y cmake ninja-build unzip curl patchelf
+
+    - name: Download and extract pinned ROCm to /opt/rocm
+      run: |
+        rocm_version="${{ env.ROCM_VERSION }}"
+        current_target="${{ matrix.gfx_target }}"
+
+        s3_target="$current_target"
+        if [[ "$current_target" = "gfx103X" || "$current_target" = "gfx110X" || "$current_target" = "gfx120X" ]]; then
+          s3_target="${current_target}-all"
+        fi
+
+        rocm_url="https://rocm.nightlies.amd.com/tarball-multi-arch/therock-dist-linux-${s3_target}-${rocm_version}.tar.gz"
+        echo "Downloading pinned ROCm: $rocm_url"
+
+        echo "DETECTED_ROCM_VERSION=$rocm_version" >> $GITHUB_ENV
+        sudo mkdir -p /opt/rocm
+        curl -sL "$rocm_url" | sudo tar --use-compress-program=gzip -xf - -C /opt/rocm --strip-components=1
+
+    - name: Set ROCm environment variables
+      run: |
+        echo "HIP_PATH=/opt/rocm" >> $GITHUB_ENV
+        echo "ROCM_PATH=/opt/rocm" >> $GITHUB_ENV
+        echo "HIP_PLATFORM=amd" >> $GITHUB_ENV
+        echo "HIP_CLANG_PATH=/opt/rocm/llvm/bin" >> $GITHUB_ENV
+        echo "HIP_INCLUDE_PATH=/opt/rocm/include" >> $GITHUB_ENV
+        echo "HIP_LIB_PATH=/opt/rocm/lib" >> $GITHUB_ENV
+        echo "HIP_DEVICE_LIB_PATH=/opt/rocm/lib/llvm/amdgcn/bitcode" >> $GITHUB_ENV
+        echo "/opt/rocm/bin:/opt/rocm/llvm/bin:$PATH" >> $GITHUB_PATH
+        echo "LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:/opt/rocm/llvm/lib:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
+        echo "LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:${LIBRARY_PATH:-}" >> $GITHUB_ENV
+        echo "CPATH=/opt/rocm/include:${CPATH:-}" >> $GITHUB_ENV
+        echo "PKG_CONFIG_PATH=/opt/rocm/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> $GITHUB_ENV
+
+    - name: Clone ROCmFPX profile branch
+      run: |
+        ref="${{ needs.resolve-ref.outputs.rocmfpx_ref }}"
+        git clone --depth 1 --single-branch --branch "$ref" https://github.com/ciru-ai/ROCmFPX.git
+        cd ROCmFPX
+        commit_hash=$(git rev-parse HEAD)
+        echo "ROCMFPX_COMMIT_HASH=$commit_hash" >> $GITHUB_ENV
+        git log --oneline -1
+
+    - name: Prepare Composable Kernel
+      working-directory: ROCmFPX
+      run: |
+        git clone https://github.com/ROCm/composable_kernel.git ../composable_kernel
+        git -C ../composable_kernel checkout "${{ env.CK_COMMIT }}"
+
+        if [ "${{ env.PROFILE }}" = "kairic-edge" ]; then
+          patch="patches/composable-kernel-gfx1151-iu4.patch"
+          expected="ea57bca3793d35d884fc156b6c0bc33d8e672e3bb49f66ff67338503029d6af5"
+          actual=$(sha256sum "$patch" | cut -d' ' -f1)
+          if [ "$actual" != "$expected" ]; then
+            echo "CK patch hash mismatch: $actual" >&2
+            exit 1
+          fi
+          git -C ../composable_kernel apply "$patch"
+          git -C ../composable_kernel diff --check
+          echo "Composable Kernel patched for Kairic Edge IU4"
+        fi
+
+    - name: Build profile runtime
+      working-directory: ROCmFPX
+      run: |
+        current_target="${{ matrix.gfx_target }}"
+        if [ "$current_target" = "gfx110X" ]; then
+          mapped_target="gfx1100;gfx1101;gfx1102;gfx1103"
+        elif [ "$current_target" = "gfx103X" ]; then
+          mapped_target="gfx1030;gfx1031;gfx1032;gfx1034"
+        elif [ "$current_target" = "gfx120X" ]; then
+          mapped_target="gfx1200;gfx1201"
+        else
+          mapped_target="$current_target"
+        fi
+
+        if [ -x /opt/rocm/bin/amdclang++ ]; then
+          hip_compiler="/opt/rocm/bin/amdclang++"
+        else
+          hip_compiler="/opt/rocm/llvm/bin/clang++"
+        fi
+
+        hip_flags=""
+        if [ "${{ env.PROFILE }}" = "kairic-edge" ]; then
+          hip_flags="-DGGML_ROCMFPX_RDNA35_MMID_MAX_BATCH=5 -DGGML_ROCMFPX_MOE_MMVQ_ROWS_PER_BLOCK=4"
+        fi
+
+        # Flags mirror Ciru's certified build recipes
+        # (docs/kairic-edge-gfx1151.md, docs/activefpx-promptforge-qwen38.md);
+        # GPU targets are parameterized so non-certified families still get a
+        # runnable build of the same branch.
+        cmake -S . -B build-profile -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_C_COMPILER="$(command -v gcc)" \
+          -DCMAKE_CXX_COMPILER="$(command -v g++)" \
+          -DCMAKE_HIP_COMPILER="$hip_compiler" \
+          -DCMAKE_HIP_FLAGS="$hip_flags" \
+          -DCMAKE_PREFIX_PATH="/opt/rocm" \
+          -DBUILD_SHARED_LIBS=ON \
+          -DGGML_CPU=ON -DGGML_OPENMP=ON -DGGML_HIP=ON -DGGML_CUDA=OFF \
+          -DGGML_VULKAN=OFF -DGGML_HIP_FORCE_MMQ=ON -DGGML_HIP_GRAPHS=ON \
+          -DGGML_HIP_MMQ_MFMA=ON -DGGML_HIP_NO_VMM=ON \
+          -DGGML_HIP_ROCWMMA_FATTN=OFF -DGGML_NATIVE=ON \
+          -DAMDGPU_TARGETS="$mapped_target" -DGPU_BUILD_TARGETS="$mapped_target" \
+          -DPROMPTFORGE_CK_ROOT="${{ github.workspace }}/composable_kernel" \
+          -DLLAMA_BUILD_WEBUI=OFF \
+          -DGGML_BUILD_TESTS=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_SERVER=ON
+
+        cmake --build build-profile --target llama-server -j "$(nproc)"
+
+    - name: Copy ROCm core libs to build directory
+      run: |
+        build_bin_path="ROCmFPX/build-profile/bin"
+
+        rocblas_lib_path="/opt/rocm/lib/rocblas/library"
+        if [ -d "$rocblas_lib_path" ]; then
+          dest_rocblas_path="$build_bin_path/rocblas/library"
+          mkdir -p "$(dirname "$dest_rocblas_path")"
+          cp -r "$rocblas_lib_path" "$(dirname "$dest_rocblas_path")/"
+        fi
+
+        hipblaslt_lib_path="/opt/rocm/lib/hipblaslt/library"
+        if [ -d "$hipblaslt_lib_path" ]; then
+          dest_hipblaslt_path="$build_bin_path/hipblaslt/library"
+          mkdir -p "$(dirname "$dest_hipblaslt_path")"
+          cp -r "$hipblaslt_lib_path" "$(dirname "$dest_hipblaslt_path")/"
+        fi
+
+        cp -v /opt/rocm/lib/libhipblas.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/librocblas.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/libamdhip64.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/librocsolver.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/libroctx64.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/libhipblaslt.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_liblzma.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/librocprofiler-register.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/libamd_comgr.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/libamd_comgr_loader.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/libhsa-runtime64.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_numa.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/librocroller.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/liborigami.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/librocm_kpack.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_z.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_zstd.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/llvm/lib/libLLVM.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/llvm/lib/libclang-cpp.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_elf.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_drm.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_drm_amdgpu.so* "$build_bin_path/" 2>/dev/null || true
+        cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_bz2.so* "$build_bin_path/" 2>/dev/null || true
+
+    - name: Set RPATH for portable distribution
+      run: |
+        cd ROCmFPX/build-profile/bin
+        for file in *.so* llama-*; do
+          [ -f "$file" ] && [ ! -L "$file" ] && patchelf --set-rpath '$ORIGIN' "$file" 2>/dev/null || true
+        done
+
+    - name: Verify Linux Binaries and Dependencies
+      run: |
+        cd ROCmFPX/build-profile/bin
+        export LD_LIBRARY_PATH="$(pwd):${LD_LIBRARY_PATH:-}"
+        ./llama-server --version
+        ldd ./llama-server > /tmp/profile-ldd.txt 2>&1 || true
+        if grep -Eiq 'not found|version .* required by .* not found' /tmp/profile-ldd.txt; then
+          cat /tmp/profile-ldd.txt
+          exit 1
+        fi
+        echo "Profile binary verification successful!"
+
+    - name: Upload build artifacts
+      id: upload-artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: rocmfpx-ubuntu-rocm-${{ matrix.gfx_target }}-${{ env.PROFILE }}-x64
+        path: ROCmFPX/build-profile/bin/
+        retention-days: 30
+
+    - name: Set job outputs
+      id: set-outputs
+      run: |
+        rocm_version="${DETECTED_ROCM_VERSION:-${{ env.ROCM_VERSION }}}"
+        echo "rocm_version=$rocm_version" >> $GITHUB_OUTPUT
+        echo "rocmfpx_commit_hash=${ROCMFPX_COMMIT_HASH}" >> $GITHUB_OUTPUT
+
+    - name: Clean up workspace
+      if: always()
+      run: |
+        if [ -f "rocm.tar.gz" ]; then rm -f rocm.tar.gz; fi
+        if [ -d "/opt/rocm" ]; then sudo rm -rf /opt/rocm; fi
+        if [ -d "ROCmFPX" ]; then rm -rf ROCmFPX; fi
+        if [ -d "composable_kernel" ]; then rm -rf composable_kernel; fi
+
+  create-release:
+    needs: [prepare-matrix, resolve-ref, build-ubuntu]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    if: |
+      always() &&
+      needs.build-ubuntu.result == 'success' &&
+      github.event_name == 'workflow_dispatch' &&
+      (github.event.inputs.create_release == 'true' || github.event.inputs.create_release == null)
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Download all build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ./all-artifacts
+
+    - name: Generate release tag
+      id: generate-tag
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        existing_tags=$(gh release list --limit 1000 --json tagName --jq '.[].tagName' | grep -E '^b[0-9]{4}$' | sort -V || echo "")
+
+        if [ -z "$existing_tags" ]; then
+          next_number=1000
+        else
+          highest_tag=$(echo "$existing_tags" | tail -n 1)
+          highest_number=$(echo "$highest_tag" | sed 's/^b//')
+          next_number=$((highest_number + 1))
+        fi
+
+        TAG=$(printf "b%04d" $next_number)
+        echo "tag=${TAG}" >> $GITHUB_OUTPUT
+        echo "Generated release tag: ${TAG}"
+
+    - name: Create archives for all target artifacts
+      run: |
+        targets="${{ env.GFX_TARGETS }}"
+        PROFILE="${{ env.PROFILE }}"
+        TAG="${{ steps.generate-tag.outputs.tag }}"
+
+        IFS=',' read -ra TARGET_ARRAY <<< "$targets"
+
+        for target in "${TARGET_ARRAY[@]}"; do
+          target=$(echo "$target" | xargs)
+          artifact_name="rocmfpx-ubuntu-rocm-${target}-${PROFILE}-x64"
+          artifact_dir="./all-artifacts/${artifact_name}"
+          final_archive_name="rocmfpx-${TAG}-ubuntu-rocm-${target}-${PROFILE}-x64"
+
+          if [ -d "$artifact_dir" ]; then
+            cd "$artifact_dir"
+            zip -r "../../${final_archive_name}.zip" *
+            cd ../../
+          else
+            echo "Warning: Artifact directory not found: $artifact_dir"
+          fi
+        done
+
+    - name: Create Release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        TAG="${{ steps.generate-tag.outputs.tag }}"
+        PROFILE="${{ env.PROFILE }}"
+        ROCM_VERSION="${{ env.ROCM_VERSION }}"
+        ROXMFPX_HASH="${{ needs.build-ubuntu.outputs.rocmfpx_commit_hash }}"
+        REF="${{ needs.resolve-ref.outputs.rocmfpx_ref }}"
+        targets="${{ env.GFX_TARGETS }}"
+
+        upload_files=""
+        IFS=',' read -ra TARGET_ARRAY <<< "$targets"
+        for target in "${TARGET_ARRAY[@]}"; do
+          target=$(echo "$target" | xargs)
+          archive="rocmfpx-${TAG}-ubuntu-rocm-${target}-${PROFILE}-x64.zip"
+          [ -f "$archive" ] && upload_files="$upload_files $archive"
+        done
+
+        case "$PROFILE" in
+          kairic-edge)
+            model_docs="## Model artifacts (download from [jcbtc/Qwen3.8-27B-IU4-Kairic-Edge](https://huggingface.co/jcbtc/Qwen3.8-27B-IU4-Kairic-Edge))
+
+        - \`Qwen3.8-27B-IU4-Kairic-Edge.gguf\`
+        - \`Qwen3.8-27B-Kairic-IU4-FFN.pfs\`
+        - \`Qwen3.8-27B-Kairic-IU4-GDN.pfs\`
+        - \`Qwen3.8-27B-Kairic-IU4-GDN-Output.pfs\`
+
+        ## Required environment
+
+        \`\`\`bash
+        export KAIRIC_FFN_SIDECAR=/path/to/Qwen3.8-27B-Kairic-IU4-FFN.pfs
+        export KAIRIC_GDN_SIDECAR=/path/to/Qwen3.8-27B-Kairic-IU4-GDN.pfs
+        export KAIRIC_GDN_OUTPUT_SIDECAR=/path/to/Qwen3.8-27B-Kairic-IU4-GDN-Output.pfs
+        \`\`\`
+
+        Startup fails closed if sidecars are missing. The log line
+        \`Kairic Edge: enabled (ngram=24/64/64, M65 verifier=strict-compact)\`
+        confirms the qualified route. Context checkpoints are required
+        (\`--ctx-checkpoints 32 --cache-ram 8192 --cache-prompt\`). Sampling/tool
+        calls require \`KAIRIC_EDGE_COMPATIBILITY_MODE=1\`. See
+        [docs/kairic-edge-gfx1151.md](https://github.com/ciru-ai/ROCmFPX/blob/${REF}/docs/kairic-edge-gfx1151.md)."
+            ;;
+          promptforge)
+            model_docs="## Model artifacts (download from [jcbtc/Qwen3.8-27B-CIRU-ActiveFPX-PromptForge](https://huggingface.co/jcbtc/Qwen3.8-27B-CIRU-ActiveFPX-PromptForge))
+
+        - \`Qwen3.8-27B-CIRU-ActiveFPX-PromptForge.gguf\`
+        - \`Qwen3.8-27B-CIRU-ActiveFPX-PromptForge-FFN.pfs\`
+        - \`Qwen3.8-27B-CIRU-ActiveFPX-PromptForge-GDN.pfs\`
+
+        ## Required environment
+
+        \`\`\`bash
+        export PROMPTFORGE_SIDECAR=/path/to/Qwen3.8-27B-CIRU-ActiveFPX-PromptForge-FFN.pfs
+        export PROMPTFORGE_GDN_SIDECAR=/path/to/Qwen3.8-27B-CIRU-ActiveFPX-PromptForge-GDN.pfs
+        export PROMPTFORGE_MODE=m2048_fused_tail1476
+        export GGML_CUDA_GRAPH_OPT=0
+        export LLAMA_MTP_CPU_ARGMAX_FASTPATH=1
+        \`\`\`
+
+        Startup fails closed if sidecars or qualified kernel routes are unavailable.
+        Launch with \`--ctx-checkpoints 32 --cache-ram 8192 --cache-prompt\`. See
+        [docs/activefpx-promptforge-qwen38.md](https://github.com/ciru-ai/ROCmFPX/blob/${REF}/docs/activefpx-promptforge-qwen38.md)."
+            ;;
+        esac
+
+        gh release create "$TAG" \
+          --title "ROCmFPX ${PROFILE} ${TAG}" \
+          --notes "**Profile**: ${PROFILE}
+        **Operating System(s)**: ubuntu
+        **GPU Target(s)**: $targets
+        **ROCm Version**: $ROCM_VERSION (certification pin)
+        **ROCmFPX Ref**: $REF @ $ROXMFPX_HASH
+        **Build Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+        > [!WARNING]
+        > The accelerated profile routes are qualified on **Strix Halo (\`gfx1151\`)**
+        > only. On other GPU families this binary runs the same branch through its
+        > documented guarded fallback paths; the specialized routes will not engage.
+
+        $model_docs" \
+          $upload_files
