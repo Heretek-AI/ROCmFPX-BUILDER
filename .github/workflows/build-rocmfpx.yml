@@ -875,12 +875,17 @@ jobs:
     - name: Trigger Homebrew Tap Formula Update
       if: steps.check-tag.outputs.tag_exists == 'false' && success()
       env:
-        GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+        TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        TAG: ${{ steps.generate-tag.outputs.tag }}
       run: |
-        TAG="${{ steps.generate-tag.outputs.tag }}"
-        echo "Notifying Homebrew Tap of new release: $TAG"
-        gh api -X POST "/repos/Heretek-AI/homebrew-tap/dispatches" \
-          -f event_type="builder-release" \
-          -f client_payload[builder]="rocmfpx" \
-          -f client_payload[release_tag]="$TAG" || echo "Note: Tap dispatch triggered or skipped if repo permissions are local"
+        if [ -n "$TAP_TOKEN" ]; then
+          echo "Notifying Homebrew Tap of new release: $TAG"
+          GITHUB_TOKEN="$TAP_TOKEN" gh api -X POST "/repos/Heretek-AI/homebrew-tap/dispatches" \
+            -f event_type="builder-release" \
+            -f client_payload[builder]="rocmfpx" \
+            -f client_payload[release_tag]="$TAG"
+          echo "[✓] Successfully dispatched event to Heretek-AI/homebrew-tap"
+        else
+          echo "::notice title=Tap Dispatch Skipped::TAP_GITHUB_TOKEN secret is not configured in repository secrets. Cross-repository dispatch was skipped. homebrew-tap's scheduled autobump.yml workflow (runs every 4 hours) will automatically synchronize this release ($TAG). To enable instant dispatch, create a GitHub Personal Access Token (PAT) with 'repo' scope and add it as secret 'TAP_GITHUB_TOKEN'."
+        fi
 
