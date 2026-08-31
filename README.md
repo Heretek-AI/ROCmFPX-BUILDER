@@ -110,6 +110,11 @@ brew tap Heretek-AI/tap
 # 2. Install ROCmFPX (defaults to AMD Strix Halo gfx1151):
 brew install rocmfpx
 
+# Or install dedicated Qwen 3.8 27B tuned deployment stack (Strix Halo gfx1151):
+brew install q38rocm
+# or via rocmfpx option:
+brew install rocmfpx --with-q38rocm
+
 # Or install for your specific GPU architecture:
 brew install rocmfpx --with-gfx1150  # AMD Strix Point (Radeon 890M)
 brew install rocmfpx --with-gfx120X  # AMD RDNA4 (RX 9070 XT)
@@ -118,6 +123,8 @@ brew install rocmfpx --with-gfx103X  # AMD RDNA2 / Steam Deck
 
 # 3. Optional: Run background OpenAI-compatible server daemon:
 brew services start rocmfpx
+# or for q38rocm:
+brew services start q38rocm
 ```
 
 ### Manual Download & Extraction
@@ -149,8 +156,11 @@ export GGML_HIP_ENABLE_UNIFIED_MEMORY=1
 ## 🏗️ Repository Overview
 
 - **`.github/workflows/build-rocmfpx.yml`**: Multi-platform matrix build pipeline downloading TheRock ROCm toolchain and publishing release archives.
+- **`.github/workflows/build-q38rocm.yml`**: High-performance Qwen 3.8 27B tuned deployment build pipeline for AMD Strix Halo (`gfx1151`) with MTP and cache fixes.
+- **`.github/workflows/build-rocmfpx-profile.yml`**: Certified profile builds (`kairic-edge`, `promptforge`).
 - **`.github/workflows/test-rocmfpx.yml`**: Standalone testing workflow for verifying release artifacts.
 - **`.github/actions/test-rocmfpx-build/`**: Composite testing action for model inference and GPU offload validation.
+- **`patches/q38rocm/`**: Tested engine patches for speculative MTP and server stability.
 - **`utils/gather_required_libs.py`**: Dynamic dependency discovery utility.
 - **`docs/manual_instructions.md`**: Step-by-step local compilation guide.
 - **`AGENTS.md`** / **`CLAUDE.md`** / **`GEMINI.md`**: Guidelines for AI coding agents.
