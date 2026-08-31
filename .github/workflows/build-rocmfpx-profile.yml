@@ -351,10 +351,14 @@ jobs:
           artifact_name="rocmfpx-ubuntu-rocm-${target}-${PROFILE}-x64"
           artifact_dir="./all-artifacts/${artifact_name}"
           final_archive_name="rocmfpx-${TAG}-ubuntu-rocm-${target}-${PROFILE}-x64"
+          ciru_archive_name="ciru-rocmfpx-${TAG}-ubuntu-rocm-${target}-${PROFILE}-x64"
+          ciru_main_archive="ciru-rocmfpx-${TAG}-ubuntu-rocm-${target}-x64"
 
           if [ -d "$artifact_dir" ]; then
             cd "$artifact_dir"
             zip -r "../../${final_archive_name}.zip" *
+            zip -r "../../${ciru_archive_name}.zip" *
+            zip -r "../../${ciru_main_archive}.zip" *
             cd ../../
           else
             echo "Warning: Artifact directory not found: $artifact_dir"
@@ -368,16 +372,16 @@ jobs:
         TAG="${{ steps.generate-tag.outputs.tag }}"
         PROFILE="${{ env.PROFILE }}"
         ROCM_VERSION="${{ env.ROCM_VERSION }}"
-        ROXMFPX_HASH="${{ needs.build-ubuntu.outputs.rocmfpx_commit_hash }}"
-        REF="${{ needs.resolve-ref.outputs.rocmfpx_ref }}"
+        ROCMFPX_REF="${{ env.ROCMFPX_REF_RESOLVED }}"
+        ROCMFPX_COMMIT_HASH="${{ needs.build-profile.outputs.rocmfpx_commit_hash }}"
+        CK_COMMIT="${{ env.CK_COMMIT }}"
         targets="${{ env.GFX_TARGETS }}"
 
         upload_files=""
-        IFS=',' read -ra TARGET_ARRAY <<< "$targets"
-        for target in "${TARGET_ARRAY[@]}"; do
-          target=$(echo "$target" | xargs)
-          archive="rocmfpx-${TAG}-ubuntu-rocm-${target}-${PROFILE}-x64.zip"
-          [ -f "$archive" ] && upload_files="$upload_files $archive"
+        for f in rocmfpx-${TAG}-*.zip ciru-rocmfpx-${TAG}-*.zip; do
+          if [ -f "$f" ]; then
+            upload_files="$upload_files $f"
+          fi
         done
 
         case "$PROFILE" in
@@ -428,11 +432,12 @@ jobs:
         esac
 
         gh release create "$TAG" \
-          --title "ROCmFPX ${PROFILE} ${TAG}" \
+          --title "Ciru ROCmFPX ${PROFILE} ${TAG}" \
           --notes "**Profile**: ${PROFILE}
         **Operating System(s)**: ubuntu
         **GPU Target(s)**: $targets
         **ROCm Version**: $ROCM_VERSION (certification pin)
+        **ROCmFPX Repository**: ciru-ai/ROCmFPX
         **ROCmFPX Ref**: $REF @ $ROXMFPX_HASH
         **Build Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
@@ -443,3 +448,15 @@ jobs:
 
         $model_docs" \
           $upload_files
+
+    - name: Trigger Homebrew Tap Formula Update
+      if: success()
+      env:
+        GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+      run: |
+        TAG="${{ steps.generate-tag.outputs.tag }}"
+        echo "Notifying Homebrew Tap of new release: $TAG"
+        gh api -X POST "/repos/Heretek-AI/homebrew-tap/dispatches" \
+          -f event_type="builder-release" \
+          -f client_payload[builder]="ciru-rocmfpx" \
+          -f client_payload[release_tag]="$TAG" || echo "Note: Tap dispatch triggered or skipped"

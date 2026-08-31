@@ -6,7 +6,12 @@ This document provides context, architecture rules, and development standards fo
 
 ## 🎯 Repository Purpose & Architecture
 
-**`Heretek-AI/ROCmFPX-BUILDER`** is an automated CI/CD build pipeline repository for [**ROCmFPX** (`ciru-ai/ROCmFPX`)](https://github.com/ciru-ai/ROCmFPX), designed to produce standalone, portable binary releases with built-in AMD ROCm™ 7 runtime libraries for Windows and Ubuntu Linux.
+**`Heretek-AI/ROCmFPX-BUILDER`** is an automated CI/CD build pipeline repository for:
+1. [**ROCmFPX Upstream** (`charlie12345/ROCmFPX`)](https://github.com/charlie12345/ROCmFPX): Canonical, actively maintained upstream ROCm acceleration stack for `llama.cpp`.
+2. [**Ciru-AI ROCmFPX** (`ciru-ai/ROCmFPX`)](https://github.com/ciru-ai/ROCmFPX): Ciru's specialized research fork featuring low-bit quantization formats (ROCmFP2..FP8, DualView Q7/Q8, PromptForge, Kairic Edge).
+3. [**q38rocm** (`julianmb/q38rocm`)](https://github.com/julianmb/q38rocm): Dedicated Qwen 3.8 27B deployment stack on Strix Halo APU (`gfx1151`).
+
+All builds produce standalone, portable binary releases with built-in AMD ROCm™ 7 runtime libraries for Windows and Ubuntu Linux.
 
 ### Key Architecture Components:
 1. **GitHub Actions Workflow (`.github/workflows/build-rocmfpx.yml`)**:

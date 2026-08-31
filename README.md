@@ -2,46 +2,57 @@
 
 <div align="center">
 
-<a href="https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest" title="Download the latest release">
-  <img src="https://img.shields.io/github/v/release/Heretek-AI/ROCmFPX-BUILDER?logo=github&logoColor=white" alt="GitHub release (latest by date)" />
-</a>
-<a href="https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest" title="View latest release date">
-  <img src="https://img.shields.io/github/release-date/Heretek-AI/ROCmFPX-BUILDER?logo=github&logoColor=white" alt="Latest release date" />
-</a>
-<a href="LICENSE" title="View license">
-  <img src="https://img.shields.io/github/license/Heretek-AI/ROCmFPX-BUILDER?logo=opensourceinitiative&logoColor=white&cacheBust=1" alt="License" />
-</a>
-<a href="https://github.com/ROCm/ROCm" title="Powered by AMD ROCm 7.0">
-  <img src="https://img.shields.io/badge/ROCm-7.0-blue?logo=amd&logoColor=white" alt="AMD ROCm 7.0" />
-</a>
-<a href="https://github.com/ciru-ai/ROCmFPX" title="Powered by ROCmFPX">
-  <img src="https://img.shields.io/badge/⚡Powered%20by-ROCmFPX-blue?logo=amd&logoColor=white" alt="Powered by ROCmFPX" />
-</a>
-<a href="#-supported-devices" title="Platform support">
-  <img src="https://img.shields.io/badge/OS-Windows%20%7C%20Ubuntu-0078D6?logo=windows&logoColor=white" alt="Platform: Windows | Ubuntu" />
-</a>
-<a href="#-supported-devices" title="GPU targets">
-  <img src="https://img.shields.io/badge/GPU-gfx1151%20%7C%20gfx1150%20%7C%20gfx120X%20%7C%20gfx110X%20%7C%20gfx103X%20%7C%20gfx90a%20%7C%20gfx908-00B04F?logo=amd&logoColor=white" alt="GPU Targets" />
-</a>
+[![Latest Release](https://img.shields.io/github/v/release/Heretek-AI/ROCmFPX-BUILDER?logo=github&logoColor=white)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/Heretek-AI/ROCmFPX-BUILDER?logo=opensourceinitiative&logoColor=white&cacheBust=1)](LICENSE)
+[![AMD ROCm 7.0](https://img.shields.io/badge/ROCm-7.0-blue?logo=amd&logoColor=white)](https://github.com/ROCm/ROCm)
+[![Platforms](https://img.shields.io/badge/OS-Windows%20%7C%20Ubuntu-0078D6?logo=windows&logoColor=white)](#-supported-devices)
+[![GPU Targets](https://img.shields.io/badge/GPU-gfx1151%20%7C%20gfx1150%20%7C%20gfx120X%20%7C%20gfx110X%20%7C%20gfx103X%20%7C%20gfx90a%20%7C%20gfx908-00B04F?logo=amd&logoColor=white)](#-supported-devices)
 
 <p align="center">
-  <b>High-performance automated nightly and on-demand builds of <a href="https://github.com/ciru-ai/ROCmFPX">ROCmFPX</a> with built-in AMD ROCm™ 7 runtime libraries for Windows & Ubuntu.</b>
+  <b>High-performance automated nightly and on-demand builds of <a href="https://github.com/charlie12345/ROCmFPX">ROCmFPX (Upstream)</a>, <a href="https://github.com/ciru-ai/ROCmFPX">Ciru-AI ROCmFPX</a>, and <a href="https://github.com/julianmb/q38rocm">q38rocm</a> with built-in AMD ROCm™ 7 runtime libraries for Windows & Ubuntu.</b>
 </p>
 
 </div>
 
 ---
 
-## ⚡ What is ROCmFPX?
+## ⚡ Supported Engine Variants
 
-[**ROCmFPX** (`ciru-ai/ROCmFPX`)](https://github.com/ciru-ai/ROCmFPX) is Ciru's specialized high-performance AMD inference stack for low-bit quantization formats, mixed-precision execution, and GPU-accelerated runtime paths:
+This repository provides automated build pipelines and release artifacts for three distinct ROCm inference engines:
+
+```mermaid
+flowchart TD
+    subgraph Engines ["Inference Engine Variants"]
+        E1["1. ROCmFPX Upstream (charlie12345/ROCmFPX)<br/>Official upstream engine • Active llama.cpp tracking • Multi-GPU HIP/MMQ"]
+        E2["2. Ciru-AI ROCmFPX (ciru-ai/ROCmFPX)<br/>Ciru research fork • DualView Q7/Q8 • PromptForge • Kairic Edge profiles"]
+        E3["3. q38rocm (julianmb/q38rocm)<br/>Dedicated Qwen 3.8 27B Strix Halo stack • 36 tok/s • MTP Speculative Decoding"]
+    end
+```
+
+### 1. **Upstream ROCmFPX** ([`charlie12345/ROCmFPX`](https://github.com/charlie12345/ROCmFPX))
+The canonical, actively maintained upstream ROCmFPX project created by Charlie.
+- Frequently synchronized with upstream `llama.cpp`.
+- Multi-architecture HIP acceleration for AMD RDNA2, RDNA3, RDNA3.5, RDNA4, and CDNA.
+- Standard high-performance MMQ/MMVQ dispatch.
+- **Homebrew Formula**: `brew install rocmfpx`
+
+### 2. **Ciru-AI ROCmFPX** ([`ciru-ai/ROCmFPX`](https://github.com/ciru-ai/ROCmFPX))
+Ciru's specialized downstream research fork featuring low-bit quantization layouts:
 - **ROCmFP2** (2.50 bpw), **ROCmFP3** (3.50 bpw), **ROCmFP4 / FAST** (4.50 / 4.25 bpw), **ROCmFP6** (6.50 bpw), **ROCmFP7 DualView** (7.50 bpw), and **ROCmFP8** (8.25 bpw).
-- **DualView Architecture**: Authoritative Q7 storage with zero-copy Q7-decode streaming and exact signed-Q8 prefill shadow for maximum throughput.
-- **ActiveFPX PromptForge**: Prompt-specialized runtime featuring fused gate/up projections, merged QKV/Z projections, and shape-guarded routes on Strix Halo (`gfx1151`).
-- **HIP/ROCm Acceleration**: Tailored MMQ and MMVQ execution paths tuned for AMD RDNA2, RDNA3, RDNA3.5, RDNA4, and CDNA architectures.
+- **DualView Architecture**: Authoritative Q7 storage with zero-copy Q7 decode streaming and exact signed-Q8 prefill shadow.
+- **ActiveFPX PromptForge**: Prompt-specialized runtime featuring fused projections on Strix Halo (`gfx1151`).
+- **Certified Profiles**: `kairic-edge` and `promptforge`.
+- **Homebrew Formula**: `brew install ciru-rocmfpx`
+
+### 3. **q38rocm** ([`julianmb/q38rocm`](https://github.com/julianmb/q38rocm))
+Julian's dedicated deployment stack for **Qwen 3.8 27B** on **AMD Strix Halo (Ryzen AI Max+ 395 / Radeon 8060S)** APUs:
+- Sustained **30.56 – 36.04 tok/s** generation throughput via MTP (Multi-Token Prediction) Speculative Decoding (K=4..6).
+- **Asymmetric TurboQuant KV Cache** (`-ctk q8_0 -ctv turbo4`): Compresses 262K context RAM from 61.4 GB to 20.08 GB.
+- **Mesa RADV Wave64 cooperative matrices** (`KHR_coopmat`).
+- **Homebrew Formula**: `brew install q38rocm`
 
 > [!IMPORTANT]  
-> **⚡ Ready to Run — ROCm™ 7 Built-in**: All binaries include complete ROCm 7 runtime libraries, hipBLAS, rocBLAS, and hipBLASLt kernels. **No separate AMD ROCm™ SDK or driver installation is required on Windows or Linux!**
+> **⚡ Ready to Run — ROCm™ 7 Built-in**: All binaries include complete ROCm 7 runtime libraries, hipBLAS, rocBLAS, and hipBLASLt kernels with portable `$ORIGIN` RPATHs. **No separate AMD ROCm™ SDK or driver installation is required on Windows or Linux!**
 
 ---
 
@@ -52,123 +63,44 @@
 | **`gfx1151`** | **Strix Halo APU** (RDNA3.5) | AMD Ryzen AI MAX+ Pro 395, Ryzen AI MAX 390, Radeon 8060S |
 | **`gfx1150`** | **Strix Point APU** (RDNA3.5) | AMD Ryzen AI 9 HX 370, Ryzen AI 9 365, Radeon 890M / 880M |
 | **`gfx120X`** | **RDNA4 dGPUs** | AMD Radeon RX 9070 XT, RX 9070 GRE, RX 9070, RX 9060 XT, RX 9060 |
-| **`gfx110X`** | **RDNA3 dGPUs & iGPUs** | Radeon PRO W7900 / W7800 / W7700 / W7600, RX 7900 XTX / XT / GRE, RX 7800 XT, RX 7700 XT, RX 7600 XT, Radeon 780M / 760M |
-| **`gfx103X`** | **RDNA2 dGPUs** | AMD Radeon RX 6950 XT, RX 6900 XT, RX 6800 XT / 6800, RX 6700 XT, RX 6600 XT, RX 6500 XT |
+| **`gfx110X`** | **RDNA3 dGPUs & iGPUs** | Radeon PRO W7900 / W7800 / W7700, RX 7900 XTX / XT / GRE, RX 7800 XT, Radeon 780M / 760M |
+| **`gfx103X`** | **RDNA2 dGPUs & Handhelds** | Steam Deck (Van Gogh), Radeon 680M, RX 6950 XT / 6800 XT / 6700 XT |
 | **`gfx90a`** | **CDNA2 Accelerators** | AMD Instinct MI210, MI250, MI250X |
 | **`gfx908`** | **CDNA1 Accelerators** | AMD Instinct MI100 |
 
 ---
 
-## 🚀 Download Release Binaries
+## 🍺 Homebrew Tap Installation
 
-Automated GitHub Actions builds are published nightly and on every release:
-
-| GPU Target | Architecture Family | Ubuntu Linux (x64) | Windows (x64) |
-|---|---|---|---|
-| **gfx1151** | Strix Halo (Ryzen AI MAX+ 395) | [![Download Ubuntu gfx1151](https://img.shields.io/badge/Download-Ubuntu%20gfx1151-blue)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest) | [![Download Windows gfx1151](https://img.shields.io/badge/Download-Windows%20gfx1151-green)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest) |
-| **gfx1150** | Strix Point (Ryzen AI 300) | [![Download Ubuntu gfx1150](https://img.shields.io/badge/Download-Ubuntu%20gfx1150-blue)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest) | [![Download Windows gfx1150](https://img.shields.io/badge/Download-Windows%20gfx1150-green)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest) |
-| **gfx120X** | RDNA4 (RX 9070 XT / 9070) | [![Download Ubuntu gfx120X](https://img.shields.io/badge/Download-Ubuntu%20gfx120X-blue)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest) | [![Download Windows gfx120X](https://img.shields.io/badge/Download-Windows%20gfx120X-green)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest) |
-| **gfx110X** | RDNA3 (RX 7900 XTX / 7800 XT / 780M) | [![Download Ubuntu gfx110X](https://img.shields.io/badge/Download-Ubuntu%20gfx110X-blue)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest) | [![Download Windows gfx110X](https://img.shields.io/badge/Download-Windows%20gfx110X-green)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest) |
-| **gfx103X** | RDNA2 (RX 6800 XT / 6700 XT) | [![Download Ubuntu gfx103X](https://img.shields.io/badge/Download-Ubuntu%20gfx103X-blue)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest) | [![Download Windows gfx103X](https://img.shields.io/badge/Download-Windows%20gfx103X-green)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest) |
-| **gfx90a** | CDNA2 (Instinct MI210 / MI250) | [![Download Ubuntu gfx90a](https://img.shields.io/badge/Download-Ubuntu%20gfx90a-blue)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest) | [![Download Windows gfx90a](https://img.shields.io/badge/Download-Windows%20gfx90a-green)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest) |
-| **gfx908** | CDNA1 (Instinct MI100) | [![Download Ubuntu gfx908](https://img.shields.io/badge/Download-Ubuntu%20gfx908-blue)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest) | [![Download Windows gfx908](https://img.shields.io/badge/Download-Windows%20gfx908-green)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest) |
-
-> **Linux (gfx1150/gfx1151 APU):** If you experience OOM errors despite free VRAM, add `ttm.pages_limit=12582912` (48 GB) to your kernel command line (e.g. GRUB), run `sudo update-grub`, and reboot.
-
----
-
-## 📦 ROCmFPX Format Catalog
-
-ROCmFPX introduces dedicated GGUF low-bit quantization formats optimized for ROCm MMQ/MMVQ kernels:
-
-| Format | Block BPW | Implementation & Features |
-|---|---:|---|
-| **`Q2_0_ROCMFPX`** | 2.50 | S40 2.50-bpw format with frozen codebook and HIP MMQ/MMVQ dispatch |
-| **`Q3_0_ROCMFPX`** | 3.50 | 3.50-bpw format with scale-search and packed execution paths |
-| **`Q4_0_ROCMFP4` / `FAST`** | 4.50 / 4.25 | Original ROCmFP4 formats with regression coverage and serving stability |
-| **`Q6_0_ROCMFPX`** | 6.50 | Strix quality recipes with optimized HIP/ROCm GPU execution |
-| **`Q7_0_ROCMFPX`** | 7.50 | Signed Q7 format and stored representation for DualView |
-| **`Q8_0_ROCMFPX`** | 8.25 | Reference precision and cross-backend baseline |
-
-Quantize any model using `llama-quantize`:
-```bash
-llama-quantize source-model-BF16.gguf output-model-FP7.gguf Q7_0_ROCMFPX
-```
-
----
-
-## 🧪 Quick Smoketest & Usage
-
-### 🍺 Homebrew Installation (Linux)
-
-Install pre-compiled ROCmFPX with embedded ROCm 7 runtime libraries via Homebrew:
+Install directly via the [**Heretek-AI/homebrew-tap**](https://github.com/Heretek-AI/homebrew-tap):
 
 ```bash
-# 1. Tap the Heretek-AI repository
+# 1. Tap the repository
 brew tap Heretek-AI/tap
 
-# 2. Install ROCmFPX (defaults to AMD Strix Halo gfx1151):
+# 2. Install Upstream ROCmFPX (charlie12345/ROCmFPX)
 brew install rocmfpx
 
-# Or install dedicated Qwen 3.8 27B tuned deployment stack (Strix Halo gfx1151):
+# Or install Ciru-AI ROCmFPX (DualView Q7 / PromptForge / Kairic Edge)
+brew install ciru-rocmfpx
+
+# Or install dedicated q38rocm (Qwen 3.8 27B @ 36 tok/s on Strix Halo)
 brew install q38rocm
-# or via rocmfpx option:
-brew install rocmfpx --with-q38rocm
-
-# Or install for your specific GPU architecture:
-brew install rocmfpx --with-gfx1150  # AMD Strix Point (Radeon 890M)
-brew install rocmfpx --with-gfx120X  # AMD RDNA4 (RX 9070 XT)
-brew install rocmfpx --with-gfx110X  # AMD RDNA3 (RX 7900, Radeon 780M)
-brew install rocmfpx --with-gfx103X  # AMD RDNA2 / Steam Deck
-
-# 3. Optional: Run background OpenAI-compatible server daemon:
-brew services start rocmfpx
-# or for q38rocm:
-brew services start q38rocm
-```
-
-### Manual Download & Extraction
-
-1. **Download** the zip archive matching your GPU from [Releases](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest).
-2. **Extract** the archive to any directory.
-3. **Run `llama-server` or `llama-cli`**:
-
-```bash
-# Start llama-server with all GPU layers offloaded
-llama-server -m YOUR_MODEL.gguf -ngl 99
-```
-
-### Running DualView Models (e.g. Ornith 35B):
-```bash
-export GGML_ROCM_GFX1151_Q7_Q8_VIEW=no-output
-export GGML_HIP_ENABLE_UNIFIED_MEMORY=1
-
-./llama-server \
-  -m Ornith1.0-35b-CIRU-DUALVIEW-FPX7+Q8-MTP.gguf \
-  --host 127.0.0.1 --port 8080 \
-  -dev ROCm0 -sm none -ngl 999 -fa on \
-  -n 16384 -c 131072 -b 2048 -ub 512 -t 16 -tb 16 \
-  -ctk f16 -ctv f16 --parallel 1 --metrics --mmap --no-repack
 ```
 
 ---
 
-## 🏗️ Repository Overview
+## 🚀 CI Workflows
 
-- **`.github/workflows/build-rocmfpx.yml`**: Multi-platform matrix build pipeline downloading TheRock ROCm toolchain and publishing release archives.
-- **`.github/workflows/build-q38rocm.yml`**: High-performance Qwen 3.8 27B tuned deployment build pipeline for AMD Strix Halo (`gfx1151`) with MTP and cache fixes.
-- **`.github/workflows/build-rocmfpx-profile.yml`**: Certified profile builds (`kairic-edge`, `promptforge`).
-- **`.github/workflows/test-rocmfpx.yml`**: Standalone testing workflow for verifying release artifacts.
-- **`.github/actions/test-rocmfpx-build/`**: Composite testing action for model inference and GPU offload validation.
-- **`patches/q38rocm/`**: Tested engine patches for speculative MTP and server stability.
-- **`utils/gather_required_libs.py`**: Dynamic dependency discovery utility.
-- **`docs/manual_instructions.md`**: Step-by-step local compilation guide.
-- **`AGENTS.md`** / **`CLAUDE.md`** / **`GEMINI.md`**: Guidelines for AI coding agents.
+- [`.github/workflows/build-rocmfpx.yml`](.github/workflows/build-rocmfpx.yml): Multi-OS, multi-GPU matrix builder for canonical upstream `charlie12345/ROCmFPX`.
+- [`.github/workflows/build-rocmfpx-profile.yml`](.github/workflows/build-rocmfpx-profile.yml): On-demand certified builder for `ciru-ai/ROCmFPX` (`kairic-edge`, `promptforge`, DualView).
+- [`.github/workflows/build-q38rocm.yml`](.github/workflows/build-q38rocm.yml): Dedicated Strix Halo `gfx1151` builder for `q38rocm`.
 
 ---
 
-## 📄 License
+## 📄 License & Attribution
 
-This builder pipeline is licensed under the [MIT License](LICENSE).  
-ROCmFPX is developed by Ciru ([ciru-ai/ROCmFPX](https://github.com/ciru-ai/ROCmFPX)) under the MIT License.
-Llama.cpp is developed by Georgi Gerganov and contributors under the MIT License.
+- **ROCmFPX (Upstream)**: Developed by Charlie ([charlie12345/ROCmFPX](https://github.com/charlie12345/ROCmFPX)) under the MIT License.
+- **ROCmFPX (Ciru Fork)**: Developed by Ciru ([ciru-ai/ROCmFPX](https://github.com/ciru-ai/ROCmFPX)) under the MIT License.
+- **q38rocm**: Developed by Julian ([julianmb/q38rocm](https://github.com/julianmb/q38rocm)) under the Apache 2.0 License.
+- **llama.cpp**: Developed by Georgi Gerganov and contributors under the MIT License.

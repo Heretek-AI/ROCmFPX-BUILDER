@@ -14,6 +14,10 @@ on:
         description: 'ROCm version to use (e.g., 7.13.0a20260318) or "latest" to auto-detect'
         required: false
         default: 'latest'
+      rocmfpx_repo:
+        description: 'ROCmFPX repository (owner/repo)'
+        required: false
+        default: 'charlie12345/ROCmFPX'
       rocmfpx_version:
         description: 'ROCmFPX version (tag, branch, commit hash, or "latest"/"main")'
         required: false
@@ -36,6 +40,7 @@ env:
   OPERATING_SYSTEMS: ${{ github.event.inputs.operating_systems || 'windows,ubuntu' }}
   GFX_TARGETS: ${{ github.event.inputs.gfx_target || 'gfx1151,gfx1150,gfx120X,gfx110X,gfx103X,gfx90a,gfx908,multiarch' }}
   ROCM_VERSION: ${{ github.event.inputs.rocm_version || 'latest' }}
+  ROCMFPX_REPO: ${{ github.event.inputs.rocmfpx_repo || 'charlie12345/ROCmFPX' }}
   ROCMFPX_VERSION: ${{ github.event.inputs.rocmfpx_version || 'main' }}
 
 jobs:
@@ -197,11 +202,23 @@ jobs:
       
     - name: Clone ROCmFPX
       run: |
+        $rocmfpxRepo = "${{ env.ROCMFPX_REPO }}"
         $rocmfpxVersion = "${{ env.ROCMFPX_VERSION }}"
-        if ($rocmfpxVersion -eq "latest" -or $rocmfpxVersion -eq "main") {
-          git clone --depth 1 --single-branch --branch main https://github.com/ciru-ai/ROCmFPX.git
+        if ($rocmfpxRepo -match '^https?://') {
+          $repoUrl = $rocmfpxRepo
         } else {
-          git clone --depth 1 --single-branch --branch $rocmfpxVersion https://github.com/ciru-ai/ROCmFPX.git
+          $repoUrl = "https://github.com/$rocmfpxRepo.git"
+        }
+        if ($rocmfpxVersion -eq "latest" -or $rocmfpxVersion -eq "main") {
+          git clone --depth 1 --single-branch --branch main $repoUrl ROCmFPX
+        } else {
+          git clone --depth 1 --single-branch --branch $rocmfpxVersion $repoUrl ROCmFPX 2>$null
+          if (-not (Test-Path ROCmFPX)) {
+            git clone $repoUrl ROCmFPX
+            cd ROCmFPX
+            git checkout $rocmfpxVersion
+            cd ..
+          }
         }
         cd ROCmFPX
         $commitHash = git rev-parse --short=7 HEAD
@@ -466,11 +483,22 @@ jobs:
         
     - name: Clone ROCmFPX
       run: |
+        rocmfpx_repo="${{ env.ROCMFPX_REPO }}"
         rocmfpx_version="${{ env.ROCMFPX_VERSION }}"
-        if [ "$rocmfpx_version" = "latest" ] || [ "$rocmfpx_version" = "main" ]; then
-          git clone --depth 1 --single-branch --branch main https://github.com/ciru-ai/ROCmFPX.git
+        if [[ "$rocmfpx_repo" =~ ^https?:// ]]; then
+          repo_url="$rocmfpx_repo"
         else
-          git clone --depth 1 --single-branch --branch "$rocmfpx_version" https://github.com/ciru-ai/ROCmFPX.git
+          repo_url="https://github.com/${rocmfpx_repo}.git"
+        fi
+        if [ "$rocmfpx_version" = "latest" ] || [ "$rocmfpx_version" = "main" ]; then
+          git clone --depth 1 --single-branch --branch main "$repo_url" ROCmFPX
+        else
+          git clone --depth 1 --single-branch --branch "$rocmfpx_version" "$repo_url" ROCmFPX 2>/dev/null || {
+            git clone "$repo_url" ROCmFPX
+            cd ROCmFPX
+            git checkout "$rocmfpx_version" || git checkout --detach "$rocmfpx_version"
+            cd ..
+          }
         fi
         cd ROCmFPX
         commit_hash=$(git rev-parse --short=7 HEAD)
@@ -835,10 +863,11 @@ jobs:
         **Operating System(s)**: $operating_systems
         **GPU Target(s)**: $targets
         **ROCm Version**: $ROCM_VERSION
+        **ROCmFPX Repository**: $ROCMFPX_REPO
         **ROCmFPX Commit Hash**: $ROCMFPX_COMMIT_HASH
         **Build Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
-        This release includes compiled ROCmFPX (Ciru) binaries with ROCm support for multiple GPU targets and operating systems, with all essential ROCm runtime libraries included. Supports ROCmFP2, ROCmFP3, ROCmFP4, ROCmFP6, ROCmFP7 (DualView), and ROCmFP8 formats." \
+        This release includes pre-compiled binaries of canonical upstream **ROCmFPX** (https://github.com/${ROCMFPX_REPO}) with AMD ROCm™ 7 GPU acceleration for multiple GPU targets and operating systems, with all essential ROCm runtime libraries included via portable \$ORIGIN RPATHs." \
           $upload_files
 
     - name: Trigger Homebrew Tap Formula Update

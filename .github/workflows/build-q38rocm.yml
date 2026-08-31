@@ -6,6 +6,10 @@ on:
         description: 'ROCm version to use (e.g., 7.15.0a20260718) or "latest" to auto-detect'
         required: false
         default: 'latest'
+      rocmfpx_repo:
+        description: 'ROCmFPX repository (owner/repo or full URL)'
+        required: false
+        default: 'charlie12345/ROCmFPX'
       rocmfpx_version:
         description: 'ROCmFPX commit, tag, or branch (default: tested q38rocm pinned commit)'
         required: false
@@ -29,6 +33,7 @@ on:
 env:
   GFX_TARGET: 'gfx1151'
   ROCM_VERSION: ${{ github.event.inputs.rocm_version || 'latest' }}
+  ROCMFPX_REPO: ${{ github.event.inputs.rocmfpx_repo || 'charlie12345/ROCmFPX' }}
   ROCMFPX_VERSION: ${{ github.event.inputs.rocmfpx_version || '0fc9568e07ccc8553010864cb8db1957e629cbfa' }}
 
 jobs:
@@ -115,12 +120,24 @@ jobs:
 
     - name: Clone ROCmFPX
       run: |
+        rocmfpx_repo="${{ env.ROCMFPX_REPO }}"
         rocmfpx_version="${{ env.ROCMFPX_VERSION }}"
-        git clone https://github.com/ciru-ai/ROCmFPX.git ROCmFPX
-        cd ROCmFPX
-        if [ "$rocmfpx_version" != "latest" ] && [ "$rocmfpx_version" != "main" ]; then
-          git checkout "$rocmfpx_version" || git checkout --detach "$rocmfpx_version"
+        if [[ "$rocmfpx_repo" =~ ^https?:// ]]; then
+          repo_url="$rocmfpx_repo"
+        else
+          repo_url="https://github.com/${rocmfpx_repo}.git"
         fi
+        if [ "$rocmfpx_version" = "latest" ] || [ "$rocmfpx_version" = "main" ]; then
+          git clone --depth 1 --single-branch --branch main "$repo_url" ROCmFPX
+        else
+          git clone --depth 1 --single-branch --branch "$rocmfpx_version" "$repo_url" ROCmFPX 2>/dev/null || {
+            git clone "$repo_url" ROCmFPX
+            cd ROCmFPX
+            git checkout "$rocmfpx_version" || git checkout --detach "$rocmfpx_version"
+            cd ..
+          }
+        fi
+        cd ROCmFPX
         commit_hash=$(git rev-parse --short=7 HEAD)
         echo "ROCMFPX_COMMIT_HASH=$commit_hash" >> $GITHUB_ENV
         git log --oneline -1
@@ -261,6 +278,7 @@ jobs:
         - **GPU Target**: gfx1151 (AMD Strix Halo / Radeon 8060S / Ryzen AI MAX+ 395)
         - **Acceleration**: Dual ROCm (HIP) + Vulkan RADV Wave64
         - **ROCm Version**: ${{ env.DETECTED_ROCM_VERSION || env.ROCM_VERSION }}
+        - **ROCmFPX Repository**: ${{ env.ROCMFPX_REPO }}
         - **ROCmFPX Commit Hash**: ${{ env.ROCMFPX_COMMIT_HASH }}
         - **Patches Applied**: mtp-prompt-cache-fix, router-loading-child-stop-timeout
         - **Build Type**: Release
@@ -341,6 +359,7 @@ jobs:
         TAG="${{ steps.generate-tag.outputs.tag }}"
         ROCM_VERSION="${{ needs.build-ubuntu.outputs.rocm_version }}"
         ROCMFPX_COMMIT_HASH="${{ needs.build-ubuntu.outputs.rocmfpx_commit_hash }}"
+        ROCMFPX_REPO="${{ env.ROCMFPX_REPO }}"
 
         gh release create "$TAG" \
           --title "ROCmFPX q38rocm $TAG" \
@@ -348,6 +367,7 @@ jobs:
         **Operating System**: Ubuntu Linux (x86_64)
         **Target Hardware**: AMD Strix Halo APU (\`gfx1151\` / Ryzen AI MAX+ 395 / Radeon 8060S)
         **ROCm Version**: $ROCM_VERSION
+        **ROCmFPX Repository**: $ROCMFPX_REPO
         **ROCmFPX Commit Hash**: $ROCMFPX_COMMIT_HASH
         **Build Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 

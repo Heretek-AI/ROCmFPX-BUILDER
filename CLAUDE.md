@@ -5,8 +5,10 @@ This file contains quick reference instructions for Anthropic's Claude Code / Cl
 ---
 
 ## 📌 Project Overview
-- **Repository**: `Heretek-AI/ROCmFPX-BUILDER`
-- **Purpose**: Automated multi-architecture build pipeline for `ciru-ai/ROCmFPX` with bundled ROCm 7 runtime libraries for Windows and Linux.
+- **Repository**: `Heretek-AI/ROCmFPX-BUILDER` is an automated CI/CD pipeline repository for pre-compiling and packaging standalone, portable binaries with embedded AMD ROCm 7 runtime libraries for:
+1. **ROCmFPX (Upstream)** (`charlie12345/ROCmFPX`): The canonical upstream engine.
+2. **Ciru-AI ROCmFPX** (`ciru-ai/ROCmFPX`): Specialized research fork (DualView, PromptForge, Kairic Edge).
+3. **q38rocm** (`julianmb/q38rocm`): Dedicated Qwen 3.8 27B Strix Halo engine.
 - **Upstream Target**: [https://github.com/ciru-ai/ROCmFPX](https://github.com/ciru-ai/ROCmFPX)
 
 ---
