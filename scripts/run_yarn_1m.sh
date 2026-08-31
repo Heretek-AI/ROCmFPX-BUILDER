@@ -29,10 +29,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ------------------------------------------------------------------------------
 # 1. Strix Halo environment (mirrors q38rocm/setup_env.sh)
 # ------------------------------------------------------------------------------
-export HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-11.5.1}"
+export HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-11.5.1}"   # gfx1151 ISA — Radeon 8060S only
 export GGML_HIP_ENABLE_UNIFIED_MEMORY="${GGML_HIP_ENABLE_UNIFIED_MEMORY:-1}"
 export ROCM_FLUSH_ACCEPT="${ROCM_FLUSH_ACCEPT:-1}"
-export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0}"   # only ROCm0 (8060S) exists
+# HIP_VISIBLE_DEVICES is auto-detected to the Radeon 8060S after the binary is
+# resolved (section 4b). If it is already set in the environment (or via
+# --hip-device during arg parsing) the user's pin is respected and no
+# auto-detection runs.
 
 # ------------------------------------------------------------------------------
 # 2. Defaults & Configuration
@@ -73,6 +76,9 @@ SPEC_DRAFT_N_MAX="${SPEC_DRAFT_N_MAX:-6}"
 SPEC_DRAFT_N_MIN="${SPEC_DRAFT_N_MIN:-0}"
 SPEC_DRAFT_P_MIN="${SPEC_DRAFT_P_MIN:-0.6}"
 SPEC_DRAFT_P_SPLIT="${SPEC_DRAFT_P_SPLIT:-0.10}"
+# --spec-mtp-strict-qwen makes greedy MTP output match no-spec decoding.
+# Off by default (faster); the server logs "strict verification is disabled".
+STRICT_MTP="${STRICT_MTP:-0}"
 # Prompt-cache RAM checkpoints, 128 GB tier (q38rocm cache_profile.sh): 64 @ 32 GiB.
 # At 1M ctx each checkpoint ≈ model state (~150 MiB) + KV for the covered range,
 # so 32 GiB holds a handful of near-1M checkpoints — raise CACHE_RAM_MIB for more.
@@ -104,12 +110,13 @@ Options:
   -c, --ctx <size>           Context window size (default: 1048576 for 1M)
   -ngl, --n-gpu-layers <n>   GPU offload layers (default: 99)
   -np, --parallel <n>        Parallel request slots (default: 1)
-  --hip-device <n>           HIP_VISIBLE_DEVICES target (default: 0)
+  --hip-device <n>           HIP_VISIBLE_DEVICES target (pins; else auto-detected to the 8060S)
   --cache-type-k <type>      KV cache Key quantization (default: q8_0)
   --cache-type-v <type>      KV cache Value quantization (default: turbo4)
   -b, --batch <size>         Logical batch size (default: 2048)
   -ub, --ubatch <size>       Physical/micro-batch size (default: 1024)
   --no-mtp                   Disable MTP speculative decoding (default: on)
+  --strict                   --spec-mtp-strict-qwen: greedy output matches no-spec
   --cache-ram <MiB>          Prompt-cache checkpoint RAM budget (default: 32768)
   --ctx-checkpoints <n>      Number of RAM context checkpoints (default: 64)
   --no-cache-prompt          Disable prompt caching / checkpoints
@@ -118,9 +125,10 @@ Options:
   --help                     Show this help message
 
 Environment Variables:
-  HSA_OVERRIDE_GFX_VERSION   ROCm gfx target (default: 11.5.1)
+  HSA_OVERRIDE_GFX_VERSION   ROCm gfx target (default: 11.5.1 — gfx1151, 8060S only)
   GGML_HIP_ENABLE_UNIFIED_MEMORY  Unified memory (default: 1)
-  HIP_VISIBLE_DEVICES        HIP device index (default: 0)
+  HIP_VISIBLE_DEVICES        HIP device index; auto-detected to the Radeon 8060S
+                             when unset (--hip-device / setting it pins the choice)
   DEVICE, MODEL_PATH, MMPROJ_PATH, PORT, HOST, CTX  Launcher defaults
 
 Example:
@@ -194,6 +202,10 @@ while [[ $# -gt 0 ]]; do
             MTP=0
             shift
             ;;
+        --strict)
+            STRICT_MTP=1
+            shift
+            ;;
         --cache-ram)
             CACHE_RAM_MIB="$2"
             shift 2
@@ -248,6 +260,33 @@ if [ -z "$LLAMA_SERVER_BIN" ] || [ ! -x "$LLAMA_SERVER_BIN" ]; then
     echo "Please install q38rocm or rocmfpx via Homebrew: brew install Heretek-AI/tap/q38rocm" >&2
     echo "Or ensure llama-server is available in PATH." >&2
     exit 1
+fi
+
+# ------------------------------------------------------------------------------
+# 4b. Auto-detect the Radeon 8060S (gfx1151) as the default ROCm target.
+#     On this box HIP device 0 is the RX 7900 XTX (gfx1100): running the
+#     gfx1151 ISA override on it fails at first compute with
+#     "ROCm error: unspecified launch failure" (ggml_cuda_cpy / hipMemcpyAsync).
+#     --list-devices prints "  ROCm<N>: <description> (<total> MiB, <free> MiB free)".
+# ------------------------------------------------------------------------------
+detect_rocm_8060s() {
+    "${LLAMA_SERVER_BIN}" --list-devices 2>/dev/null \
+        | sed -nE 's/^[[:space:]]*ROCm([0-9]+):.*8060S.*/\1/p' | head -1
+}
+
+if [ -z "${HIP_VISIBLE_DEVICES+x}" ]; then
+    ROCM_APU_INDEX="$(detect_rocm_8060s)"
+    if [ -n "$ROCM_APU_INDEX" ]; then
+        export HIP_VISIBLE_DEVICES="${ROCM_APU_INDEX}"
+        DEVICE_MODE="auto-detected Radeon 8060S (HIP_VISIBLE_DEVICES=${ROCM_APU_INDEX})"
+    else
+        echo "⚠️  [WARN] Could not auto-detect the Radeon 8060S in '${LLAMA_SERVER_BIN} --list-devices'." >&2
+        echo "   Defaulting HIP_VISIBLE_DEVICES=0. HSA_OVERRIDE_GFX_VERSION=11.5.1 (gfx1151) only matches the 8060S." >&2
+        export HIP_VISIBLE_DEVICES=0
+        DEVICE_MODE="HIP_VISIBLE_DEVICES=0 fallback"
+    fi
+else
+    DEVICE_MODE="HIP_VISIBLE_DEVICES pinned=${HIP_VISIBLE_DEVICES}"
 fi
 
 # ------------------------------------------------------------------------------
@@ -314,14 +353,14 @@ echo "==========================================================================
 echo " 🚀 Launching Qwen 3.8 27B YaRN 1M Context Server"
 echo "================================================================================"
 echo " Engine Binary     : ${LLAMA_SERVER_BIN}"
-echo " Device Backend    : ${DEVICE} (HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES})"
+echo " Device Backend    : ${DEVICE} (${DEVICE_MODE})"
 echo " Model             : ${RESOLVED_MODEL}"
 [ -n "$RESOLVED_MMPROJ" ] && echo " MMProj            : ${RESOLVED_MMPROJ}" || echo " MMProj            : none"
 echo " Host / Port       : ${HOST}:${PORT}"
 echo " Context Size      : ${CTX} tokens (1M via YaRN 4x on 262K native base)"
 echo " RoPE Parameters   : scaling=${ROPE_SCALING} scale=${ROPE_SCALE} orig_ctx=${YARN_ORIG_CTX}"
 echo " KV Cache Format   : Key=${CACHE_TYPE_K}, Value=${CACHE_TYPE_V} (draft: ${CACHE_TYPE_K_DRAFT}/${CACHE_TYPE_V_DRAFT})"
-echo " Speculative       : $([ "${MTP}" = "1" ] && printf 'MTP draft-mtp n_max=%s p_min=%s' "${SPEC_DRAFT_N_MAX}" "${SPEC_DRAFT_P_MIN}" || printf 'disabled')"
+echo " Speculative       : $([ "${MTP}" = "1" ] && printf 'MTP draft-mtp n_max=%s p_min=%s%s' "${SPEC_DRAFT_N_MAX}" "${SPEC_DRAFT_P_MIN}" "$([ "${STRICT_MTP}" = "1" ] && printf ' (strict)' || printf '')" || printf 'disabled')"
 echo " Prompt Cache      : $([ "${CACHE_PROMPT}" = "1" ] && printf '%s checkpoints @ %s MiB (every %s tok)' "${CTX_CHECKPOINTS}" "${CACHE_RAM_MIB}" "${CHECKPOINT_EVERY}" || printf 'disabled')"
 echo " Batching          : logical=${BATCH_SIZE}, physical=${UBATCH_SIZE}, threads=${THREADS}/${THREADS_BATCH}"
 echo "================================================================================"
@@ -395,6 +434,9 @@ if [ "${MTP}" = "1" ]; then
         "--spec-draft-poll" "1"
         "--spec-draft-poll-batch" "1"
     )
+    if [ "${STRICT_MTP}" = "1" ]; then
+        CMD+=("--spec-mtp-strict-qwen")
+    fi
 fi
 
 if [ -n "${REASONING}" ]; then
