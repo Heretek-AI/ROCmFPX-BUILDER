@@ -91,6 +91,46 @@ brew install q38rocm
 
 ---
 
+## 🧠 Running Qwen 3.8 27B with 1M YaRN Context Extension
+
+To run **Qwen 3.8 27B** with a **1,048,576 token (1M) context window** on AMD Strix Halo / ROCm using YaRN RoPE interpolation and 4-bit KV cache:
+
+### 1. Using the Convenience Script
+```bash
+./scripts/run_yarn_1m.sh -m /path/to/Qwen3.8-27B-ROCmFP4-STRIX_LEAN.gguf --mmproj /path/to/mmproj-F16.gguf
+```
+
+### 2. Direct `llama-server` CLI Invocation
+```bash
+HIP_VISIBLE_DEVICES=1 /home/linuxbrew/.linuxbrew/opt/q38rocm/bin/llama-server \
+  --host 0.0.0.0 \
+  --port 8800 \
+  -m /home/ronin/Projects/models/Qwen-3.8-27B-ROCmFP4-FAST-GGUF/Qwen3.8-27B-ROCmFP4-STRIX_LEAN.gguf \
+  --mmproj /home/ronin/Projects/models/Qwen-3.8-27B-ROCmFP4-FAST-GGUF/mmproj-F16.gguf \
+  -ngl 99 \
+  -np 1 \
+  -c 1048576 \
+  --rope-scaling yarn \
+  --rope-scale 4.0 \
+  --yarn-orig-ctx 262144 \
+  --yarn-ext-factor -1 \
+  --yarn-attn-factor 1.0 \
+  --yarn-beta-slow 1 \
+  --yarn-beta-fast 32 \
+  --cache-type-k q4_0 \
+  --cache-type-v q4_0 \
+  -fa on \
+  -b 2048 \
+  -ub 512
+```
+
+> **Parameter Notes:**
+> - `-c 1048576`: Allocates the 1M token context buffer.
+> - `--rope-scaling yarn --rope-scale 4.0`: Scales frequencies 4× from Qwen 3.8's native 262,144 base window (`--yarn-orig-ctx 262144`).
+> - `--cache-type-k q4_0 --cache-type-v q4_0`: 4-bit KV cache reduces memory footprint to ~40 GB, easily fitting within 128 GB unified memory on AMD Strix Halo (Ryzen AI Max+ 395).
+
+---
+
 ## 🚀 CI Workflows
 
 - [`.github/workflows/build-rocmfpx.yml`](.github/workflows/build-rocmfpx.yml): Multi-OS, multi-GPU matrix builder for canonical upstream `charlie12345/ROCmFPX`.
