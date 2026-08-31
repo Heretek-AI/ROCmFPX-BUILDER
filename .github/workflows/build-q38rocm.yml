@@ -33,7 +33,7 @@ env:
 
 jobs:
   build-ubuntu:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     outputs:
       rocm_version: ${{ steps.set-outputs.outputs.rocm_version }}
       rocmfpx_commit_hash: ${{ steps.set-outputs.outputs.rocmfpx_commit_hash }}
@@ -285,7 +285,7 @@ jobs:
 
   create-release:
     needs: [build-ubuntu]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       pull-requests: write
