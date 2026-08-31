@@ -237,8 +237,10 @@ CMD=(
     "--port" "${PORT}"
     "-m" "${RESOLVED_MODEL}"
     "-ngl" "${NGL}"
+    "-fit" "off"
     "-np" "${NP}"
     "-c" "${CTX}"
+    "--override-kv" "qwen2.context_length=int:${CTX},qwen2vl.context_length=int:${CTX},qwen3.context_length=int:${CTX}"
     "--rope-scaling" "${ROPE_SCALING}"
     "--rope-scale" "${ROPE_SCALE}"
     "--yarn-orig-ctx" "${YARN_ORIG_CTX}"
@@ -254,7 +256,7 @@ CMD=(
 )
 
 if [ -n "$RESOLVED_MMPROJ" ]; then
-    CMD+=("--mmproj" "${RESOLVED_MMPROJ}")
+    CMD+=("--mmproj" "${RESOLVED_MMPROJ}" "--image-min-tokens" "1024")
 fi
 
 if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then

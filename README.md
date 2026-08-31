@@ -107,9 +107,12 @@ HIP_VISIBLE_DEVICES=1 /home/linuxbrew/.linuxbrew/opt/q38rocm/bin/llama-server \
   --port 8800 \
   -m /home/ronin/Projects/models/Qwen-3.8-27B-ROCmFP4-FAST-GGUF/Qwen3.8-27B-ROCmFP4-STRIX_LEAN.gguf \
   --mmproj /home/ronin/Projects/models/Qwen-3.8-27B-ROCmFP4-FAST-GGUF/mmproj-F16.gguf \
+  --image-min-tokens 1024 \
   -ngl 99 \
+  -fit off \
   -np 1 \
   -c 1048576 \
+  --override-kv qwen2.context_length=int:1048576,qwen2vl.context_length=int:1048576,qwen3.context_length=int:1048576 \
   --rope-scaling yarn \
   --rope-scale 4.0 \
   --yarn-orig-ctx 262144 \
@@ -126,8 +129,11 @@ HIP_VISIBLE_DEVICES=1 /home/linuxbrew/.linuxbrew/opt/q38rocm/bin/llama-server \
 
 > **Parameter Notes:**
 > - `-c 1048576`: Allocates the 1M token context buffer.
+> - `--override-kv qwen2.context_length=int:1048576...`: Overrides GGUF metadata `n_ctx_train` so `llama-server` initializes the full 1M slot context without capping at 262K.
+> - `-fit off`: Disables automatic VRAM fitting when full layers (`-ngl 99`) are explicitly requested.
 > - `--rope-scaling yarn --rope-scale 4.0`: Scales frequencies 4× from Qwen 3.8's native 262,144 base window (`--yarn-orig-ctx 262144`).
 > - `--cache-type-k q4_0 --cache-type-v q4_0`: 4-bit KV cache reduces memory footprint to ~40 GB, easily fitting within 128 GB unified memory on AMD Strix Halo (Ryzen AI Max+ 395).
+> - `--image-min-tokens 1024`: Ensures required vision grounding tokens for Qwen-VL multimodal inputs.
 
 ---
 
