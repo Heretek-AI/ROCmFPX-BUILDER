@@ -3,6 +3,7 @@
 <div align="center">
 
 [![Latest Release](https://img.shields.io/github/v/release/Heretek-AI/ROCmFPX-BUILDER?logo=github&logoColor=white)](https://github.com/Heretek-AI/ROCmFPX-BUILDER/releases/latest)
+[![Homebrew Tap](https://img.shields.io/badge/Homebrew-Heretek--AI%2Ftap-FBB040?logo=homebrew&logoColor=white)](https://github.com/Heretek-AI/homebrew-tap)
 [![License: MIT](https://img.shields.io/github/license/Heretek-AI/ROCmFPX-BUILDER?logo=opensourceinitiative&logoColor=white&cacheBust=1)](LICENSE)
 [![AMD ROCm 7.0](https://img.shields.io/badge/ROCm-7.0-blue?logo=amd&logoColor=white)](https://github.com/ROCm/ROCm)
 [![Platforms](https://img.shields.io/badge/OS-Windows%20%7C%20Ubuntu-0078D6?logo=windows&logoColor=white)](#-supported-devices)
