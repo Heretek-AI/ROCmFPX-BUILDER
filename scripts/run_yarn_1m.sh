@@ -1,8 +1,25 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # run_yarn_1m.sh — High-Performance 1M Context Server for Qwen 3.8 27B with YaRN
-# Scales 262K native context to 1,048,576 tokens using YaRN RoPE scaling & Q4_0 KV.
-# Engineered for AMD ROCm 7 / Strix Halo APU & RDNA/CDNA Accelerators.
+# Scales 262K native context to 1,048,576 tokens using YaRN RoPE scaling.
+# Engineered for AMD ROCm 7 / Strix Halo APU (Ryzen AI Max+ 395 / Radeon 8060S).
+#
+# Target model: Qwen3.8-27B-ROCmFP4-STRIX_LEAN.gguf
+#   arch = qwen35 (hybrid SSM + full-attention, M-RoPE, MTP head
+#   nextn_predict_layers=1), native context_length = 262144.
+#
+# Refinement rationale (vs the naive launcher), grounded in build 244 (0fc9568):
+#   * --override-kv uses qwen35.context_length — the old qwen2/qwen2vl/qwen3 keys
+#     never matched the real arch, so n_ctx_train stayed 262144 and llama-server
+#     silently capped the slot at it ("...exceeds the training context...capping").
+#   * TurboQuant KV (q8_0 K / turbo4 V) — the upstream-validated long-context
+#     recipe for this model family.
+#   * MTP speculative decode (n_max 6 / p_min 0.6) — ROCmFPX-measured dense-27B
+#     sweet spot (~2.4-2.9x decode). Build 244 ships the mtp-prompt-cache-fix.
+#   * RAM context checkpoints sized for 1M on a 128 GB box (64 cps @ 32 GiB).
+#     Note: cache-reuse / KV-shifting is inherently disabled by the hybrid
+#     recurrent architecture — RAM checkpoints are the only reuse path.
+#   * Strix Halo env (HSA_OVERRIDE_GFX_VERSION, unified memory) + -dev ROCm0.
 # ==============================================================================
 
 set -eo pipefail
@@ -10,16 +27,25 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ------------------------------------------------------------------------------
-# 1. Defaults & Configuration
+# 1. Strix Halo environment (mirrors q38rocm/setup_env.sh)
 # ------------------------------------------------------------------------------
-HIP_DEVICE="${HIP_VISIBLE_DEVICES:-1}"
+export HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-11.5.1}"
+export GGML_HIP_ENABLE_UNIFIED_MEMORY="${GGML_HIP_ENABLE_UNIFIED_MEMORY:-1}"
+export ROCM_FLUSH_ACCEPT="${ROCM_FLUSH_ACCEPT:-1}"
+export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0}"   # only ROCm0 (8060S) exists
+
+# ------------------------------------------------------------------------------
+# 2. Defaults & Configuration
+# ------------------------------------------------------------------------------
+DEVICE="${DEVICE:-ROCm0}"               # ROCm0 = 8060S unified (stable); --device Vulkan1 for decode-fast
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8800}"
 MODEL_PATH="${MODEL_PATH:-}"
 MMPROJ_PATH="${MMPROJ_PATH:-}"
+NO_MMPROJ="${NO_MMPROJ:-0}"
 NGL="${NGL:-99}"
 NP="${NP:-1}"
-CTX="${CTX:-1048576}" # 1M context (1,048,576 tokens)
+CTX="${CTX:-1048576}" # 1M context (1,048,576 tokens) via YaRN 4x on 262K native base
 ROPE_SCALING="${ROPE_SCALING:-yarn}"
 ROPE_SCALE="${ROPE_SCALE:-4.0}"
 YARN_ORIG_CTX="${YARN_ORIG_CTX:-262144}" # 256K native base context
@@ -27,15 +53,40 @@ YARN_EXT_FACTOR="${YARN_EXT_FACTOR:--1}"
 YARN_ATTN_FACTOR="${YARN_ATTN_FACTOR:-1.0}"
 YARN_BETA_SLOW="${YARN_BETA_SLOW:-1}"
 YARN_BETA_FAST="${YARN_BETA_FAST:-32}"
-CACHE_TYPE_K="${CACHE_TYPE_K:-q4_0}"
-CACHE_TYPE_V="${CACHE_TYPE_V:-q4_0}"
+CACHE_TYPE_K="${CACHE_TYPE_K:-q8_0}"     # TurboQuant: Keys stay 8-bit (sharp attention routing)
+CACHE_TYPE_V="${CACHE_TYPE_V:-turbo4}"   # TurboQuant: Values compressed to 4-bit
+CACHE_TYPE_K_DRAFT="${CACHE_TYPE_K_DRAFT:-q8_0}"
+CACHE_TYPE_V_DRAFT="${CACHE_TYPE_V_DRAFT:-turbo4}"
 FLASH_ATTN="${FLASH_ATTN:-on}"
 BATCH_SIZE="${BATCH_SIZE:-2048}"
-UBATCH_SIZE="${UBATCH_SIZE:-512}"
+UBATCH_SIZE="${UBATCH_SIZE:-1024}"
+THREADS="${THREADS:-16}"
+THREADS_BATCH="${THREADS_BATCH:-32}"
+POLL="${POLL:-50}"
+TEMP="${TEMP:-0}"
+TOP_P="${TOP_P:-0.95}"
+TOP_K="${TOP_K:-20}"
+# MTP speculative decoding (model exposes an MTP head). n6/p0.6 is the
+# ROCmFPX-measured dense-27B sweet spot. Disable with --no-mtp.
+MTP="${MTP:-1}"
+SPEC_DRAFT_N_MAX="${SPEC_DRAFT_N_MAX:-6}"
+SPEC_DRAFT_N_MIN="${SPEC_DRAFT_N_MIN:-0}"
+SPEC_DRAFT_P_MIN="${SPEC_DRAFT_P_MIN:-0.6}"
+SPEC_DRAFT_P_SPLIT="${SPEC_DRAFT_P_SPLIT:-0.10}"
+# Prompt-cache RAM checkpoints, 128 GB tier (q38rocm cache_profile.sh): 64 @ 32 GiB.
+# At 1M ctx each checkpoint ≈ model state (~150 MiB) + KV for the covered range,
+# so 32 GiB holds a handful of near-1M checkpoints — raise CACHE_RAM_MIB for more.
+CACHE_RAM_MIB="${CACHE_RAM_MIB:-32768}"
+CTX_CHECKPOINTS="${CTX_CHECKPOINTS:-64}"
+CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-4096}"
+CACHE_PROMPT="${CACHE_PROMPT:-1}"
+SLOT_SAVE_PATH="${SLOT_SAVE_PATH:-${SCRIPT_DIR}/cache/slots}"
+REASONING="${REASONING:-}"              # empty = fork default (keeps thinking template); --reasoning off to disable
+REASONING_BUDGET="${REASONING_BUDGET:-}"
 EXTRA_ARGS=()
 
 # ------------------------------------------------------------------------------
-# 2. CLI Argument Parsing
+# 3. CLI Argument Parsing
 # ------------------------------------------------------------------------------
 show_help() {
     cat <<EOF
@@ -46,23 +97,31 @@ Launch Qwen 3.8 27B with 1M YaRN context extension on AMD ROCm / Strix Halo.
 Options:
   -m, --model <path>         Path to Qwen 3.8 27B GGUF model file
   --mmproj <path>            Path to multimodal projector GGUF (optional)
+  --no-mmproj                Disable auto-detected multimodal projector
+  --device <dev>             Backend device: ROCm0 (default) or Vulkan1
   -p, --port <port>          Server port (default: 8800)
   -h, --host <host>          Server bind host (default: 0.0.0.0)
   -c, --ctx <size>           Context window size (default: 1048576 for 1M)
   -ngl, --n-gpu-layers <n>   GPU offload layers (default: 99)
   -np, --parallel <n>        Parallel request slots (default: 1)
-  --hip-device <n>           HIP_VISIBLE_DEVICES target (default: 1)
-  --cache-type-k <type>      KV cache Key quantization (default: q4_0)
-  --cache-type-v <type>      KV cache Value quantization (default: q4_0)
-  -b, --batch <size>         Batch size (default: 2048)
-  -ub, --ubatch <size>       Micro-batch size (default: 512)
+  --hip-device <n>           HIP_VISIBLE_DEVICES target (default: 0)
+  --cache-type-k <type>      KV cache Key quantization (default: q8_0)
+  --cache-type-v <type>      KV cache Value quantization (default: turbo4)
+  -b, --batch <size>         Logical batch size (default: 2048)
+  -ub, --ubatch <size>       Physical/micro-batch size (default: 1024)
+  --no-mtp                   Disable MTP speculative decoding (default: on)
+  --cache-ram <MiB>          Prompt-cache checkpoint RAM budget (default: 32768)
+  --ctx-checkpoints <n>      Number of RAM context checkpoints (default: 64)
+  --no-cache-prompt          Disable prompt caching / checkpoints
+  --reasoning <on|off|auto>  Thinking mode (default: fork default)
+  --reasoning-budget <n>     Thinking token budget (-1 = unlimited)
   --help                     Show this help message
 
 Environment Variables:
-  HIP_VISIBLE_DEVICES        GPU device index (default: 1)
-  MODEL_PATH                 Default model path
-  MMPROJ_PATH                Default mmproj path
-  PORT, HOST, CTX            Server network & context configuration
+  HSA_OVERRIDE_GFX_VERSION   ROCm gfx target (default: 11.5.1)
+  GGML_HIP_ENABLE_UNIFIED_MEMORY  Unified memory (default: 1)
+  HIP_VISIBLE_DEVICES        HIP device index (default: 0)
+  DEVICE, MODEL_PATH, MMPROJ_PATH, PORT, HOST, CTX  Launcher defaults
 
 Example:
   $(basename "$0") -m /path/to/Qwen3.8-27B-ROCmFP4-STRIX_LEAN.gguf --mmproj /path/to/mmproj-F16.gguf
@@ -81,6 +140,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --mmproj)
             MMPROJ_PATH="$2"
+            shift 2
+            ;;
+        --no-mmproj)
+            NO_MMPROJ=1
+            shift
+            ;;
+        --device)
+            DEVICE="$2"
             shift 2
             ;;
         -p|--port)
@@ -104,7 +171,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --hip-device)
-            HIP_DEVICE="$2"
+            export HIP_VISIBLE_DEVICES="$2"
             shift 2
             ;;
         --cache-type-k)
@@ -123,6 +190,30 @@ while [[ $# -gt 0 ]]; do
             UBATCH_SIZE="$2"
             shift 2
             ;;
+        --no-mtp)
+            MTP=0
+            shift
+            ;;
+        --cache-ram)
+            CACHE_RAM_MIB="$2"
+            shift 2
+            ;;
+        --ctx-checkpoints)
+            CTX_CHECKPOINTS="$2"
+            shift 2
+            ;;
+        --no-cache-prompt)
+            CACHE_PROMPT=0
+            shift
+            ;;
+        --reasoning)
+            REASONING="$2"
+            shift 2
+            ;;
+        --reasoning-budget)
+            REASONING_BUDGET="$2"
+            shift 2
+            ;;
         *)
             if [ -z "$MODEL_PATH" ] && [[ "$1" == *.gguf ]]; then
                 MODEL_PATH="$1"
@@ -135,7 +226,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ------------------------------------------------------------------------------
-# 3. Resolve Binary Path
+# 4. Resolve Binary Path
 # ------------------------------------------------------------------------------
 LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-}"
 if [ -z "$LLAMA_SERVER_BIN" ]; then
@@ -160,7 +251,7 @@ if [ -z "$LLAMA_SERVER_BIN" ] || [ ! -x "$LLAMA_SERVER_BIN" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 4. Resolve Model Path
+# 5. Resolve Model Path
 # ------------------------------------------------------------------------------
 CANDIDATE_MODELS=(
     "${MODEL_PATH}"
@@ -193,54 +284,60 @@ if [ -z "$RESOLVED_MODEL" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 5. Resolve Multimodal Projector (mmproj) Path (Optional)
+# 6. Resolve Multimodal Projector (mmproj) Path (Optional)
+#    NOTE: the HF repo ships no mmproj (text-only model); if a local
+#    mmproj-F16.gguf is found it is attached, but disable with --no-mmproj.
 # ------------------------------------------------------------------------------
-CANDIDATE_MMPROJ=(
-    "${MMPROJ_PATH}"
-    "/home/ronin/Projects/models/Qwen-3.8-27B-ROCmFP4-FAST-GGUF/mmproj-F16.gguf"
-    "${HOME}/Projects/models/Qwen-3.8-27B-ROCmFP4-FAST-GGUF/mmproj-F16.gguf"
-    "${HOME}/models/Qwen-3.8-27B-ROCmFP4-FAST-GGUF/mmproj-F16.gguf"
-    "$(dirname "${RESOLVED_MODEL}")/mmproj-F16.gguf"
-    "${SCRIPT_DIR}/../models/mmproj-F16.gguf"
-)
-
 RESOLVED_MMPROJ=""
-for candidate in "${CANDIDATE_MMPROJ[@]}"; do
-    if [ -n "$candidate" ] && [ -f "$candidate" ]; then
-        RESOLVED_MMPROJ="$candidate"
-        break
-    fi
-done
+if [ "${NO_MMPROJ}" != "1" ]; then
+    CANDIDATE_MMPROJ=(
+        "${MMPROJ_PATH}"
+        "/home/ronin/Projects/models/Qwen-3.8-27B-ROCmFP4-FAST-GGUF/mmproj-F16.gguf"
+        "${HOME}/Projects/models/Qwen-3.8-27B-ROCmFP4-FAST-GGUF/mmproj-F16.gguf"
+        "${HOME}/models/Qwen-3.8-27B-ROCmFP4-FAST-GGUF/mmproj-F16.gguf"
+        "$(dirname "${RESOLVED_MODEL}")/mmproj-F16.gguf"
+        "${SCRIPT_DIR}/../models/mmproj-F16.gguf"
+    )
+
+    for candidate in "${CANDIDATE_MMPROJ[@]}"; do
+        if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+            RESOLVED_MMPROJ="$candidate"
+            break
+        fi
+    done
+fi
 
 # ------------------------------------------------------------------------------
-# 6. Assemble Command & Launch
+# 7. Assemble Command & Launch
 # ------------------------------------------------------------------------------
-export HIP_VISIBLE_DEVICES="${HIP_DEVICE}"
-
 echo "================================================================================"
 echo " 🚀 Launching Qwen 3.8 27B YaRN 1M Context Server"
 echo "================================================================================"
 echo " Engine Binary     : ${LLAMA_SERVER_BIN}"
-echo " HIP Device Target : HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES}"
+echo " Device Backend    : ${DEVICE} (HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES})"
 echo " Model             : ${RESOLVED_MODEL}"
-[ -n "$RESOLVED_MMPROJ" ] && echo " MMProj            : ${RESOLVED_MMPROJ}"
+[ -n "$RESOLVED_MMPROJ" ] && echo " MMProj            : ${RESOLVED_MMPROJ}" || echo " MMProj            : none"
 echo " Host / Port       : ${HOST}:${PORT}"
 echo " Context Size      : ${CTX} tokens (1M via YaRN 4x on 262K native base)"
 echo " RoPE Parameters   : scaling=${ROPE_SCALING} scale=${ROPE_SCALE} orig_ctx=${YARN_ORIG_CTX}"
-echo " KV Cache Format   : Key=${CACHE_TYPE_K}, Value=${CACHE_TYPE_V}"
-echo " Batch / MicroBatch: ${BATCH_SIZE} / ${UBATCH_SIZE}"
+echo " KV Cache Format   : Key=${CACHE_TYPE_K}, Value=${CACHE_TYPE_V} (draft: ${CACHE_TYPE_K_DRAFT}/${CACHE_TYPE_V_DRAFT})"
+echo " Speculative       : $([ "${MTP}" = "1" ] && printf 'MTP draft-mtp n_max=%s p_min=%s' "${SPEC_DRAFT_N_MAX}" "${SPEC_DRAFT_P_MIN}" || printf 'disabled')"
+echo " Prompt Cache      : $([ "${CACHE_PROMPT}" = "1" ] && printf '%s checkpoints @ %s MiB (every %s tok)' "${CTX_CHECKPOINTS}" "${CACHE_RAM_MIB}" "${CHECKPOINT_EVERY}" || printf 'disabled')"
+echo " Batching          : logical=${BATCH_SIZE}, physical=${UBATCH_SIZE}, threads=${THREADS}/${THREADS_BATCH}"
 echo "================================================================================"
 
 CMD=(
     "${LLAMA_SERVER_BIN}"
-    "--host" "${HOST}"
-    "--port" "${PORT}"
     "-m" "${RESOLVED_MODEL}"
+    "-dev" "${DEVICE}"
     "-ngl" "${NGL}"
-    "-fit" "off"
+    "-fa" "${FLASH_ATTN}"
     "-np" "${NP}"
     "-c" "${CTX}"
-    "--override-kv" "qwen2.context_length=int:${CTX},qwen2vl.context_length=int:${CTX},qwen3.context_length=int:${CTX}"
+    # qwen35 is the real arch key; without this the server caps the slot at the
+    # model's native 262K training context (n_ctx_train is read from
+    # {arch}.context_length, YaRN does not raise it).
+    "--override-kv" "qwen35.context_length=int:${CTX}"
     "--rope-scaling" "${ROPE_SCALING}"
     "--rope-scale" "${ROPE_SCALE}"
     "--yarn-orig-ctx" "${YARN_ORIG_CTX}"
@@ -248,12 +345,64 @@ CMD=(
     "--yarn-attn-factor" "${YARN_ATTN_FACTOR}"
     "--yarn-beta-slow" "${YARN_BETA_SLOW}"
     "--yarn-beta-fast" "${YARN_BETA_FAST}"
-    "--cache-type-k" "${CACHE_TYPE_K}"
-    "--cache-type-v" "${CACHE_TYPE_V}"
-    "-fa" "${FLASH_ATTN}"
+    "-ctk" "${CACHE_TYPE_K}"
+    "-ctv" "${CACHE_TYPE_V}"
     "-b" "${BATCH_SIZE}"
     "-ub" "${UBATCH_SIZE}"
+    "-t" "${THREADS}"
+    "-tb" "${THREADS_BATCH}"
+    "--temp" "${TEMP}"
+    "--top-p" "${TOP_P}"
+    "--top-k" "${TOP_K}"
+    "--no-context-shift"
+    "-fit" "off"
+    "--no-mmap"
+    "--cont-batching"
+    "--kv-unified"
+    "--poll" "${POLL}"
+    "--alias" "qwen38-27b"
+    "--metrics"
+    "--no-webui"
+    "--host" "${HOST}"
+    "--port" "${PORT}"
 )
+
+if [ "${CACHE_PROMPT}" = "1" ]; then
+    mkdir -p "${SLOT_SAVE_PATH}"
+    CMD+=(
+        "--cache-prompt"
+        "--cache-idle-slots"
+        "--cache-ram" "${CACHE_RAM_MIB}"
+        "--ctx-checkpoints" "${CTX_CHECKPOINTS}"
+        "--checkpoint-every-n-tokens" "${CHECKPOINT_EVERY}"
+        "--slot-save-path" "${SLOT_SAVE_PATH}"
+    )
+else
+    CMD+=("--no-cache-prompt" "--ctx-checkpoints" "0" "--cache-ram" "0")
+fi
+
+if [ "${MTP}" = "1" ]; then
+    CMD+=(
+        "--spec-type" "draft-mtp"
+        "--spec-draft-ngl" "all"
+        "--spec-draft-n-max" "${SPEC_DRAFT_N_MAX}"
+        "--spec-draft-n-min" "${SPEC_DRAFT_N_MIN}"
+        "--spec-draft-p-min" "${SPEC_DRAFT_P_MIN}"
+        "--spec-draft-p-split" "${SPEC_DRAFT_P_SPLIT}"
+        "--no-spec-draft-backend-sampling"
+        "--spec-draft-type-k" "${CACHE_TYPE_K_DRAFT}"
+        "--spec-draft-type-v" "${CACHE_TYPE_V_DRAFT}"
+        "--spec-draft-poll" "1"
+        "--spec-draft-poll-batch" "1"
+    )
+fi
+
+if [ -n "${REASONING}" ]; then
+    CMD+=("--reasoning" "${REASONING}")
+fi
+if [ -n "${REASONING_BUDGET}" ]; then
+    CMD+=("--reasoning-budget" "${REASONING_BUDGET}")
+fi
 
 if [ -n "$RESOLVED_MMPROJ" ]; then
     CMD+=("--mmproj" "${RESOLVED_MMPROJ}" "--image-min-tokens" "1024")
