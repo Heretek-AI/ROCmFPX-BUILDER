@@ -134,6 +134,7 @@ HIP_VISIBLE_DEVICES=1 /home/linuxbrew/.linuxbrew/opt/q38rocm/bin/llama-server \
 > - `--rope-scaling yarn --rope-scale 4.0`: Scales frequencies 4× from Qwen 3.8's native 262,144 base window (`--yarn-orig-ctx 262144`).
 > - `-ctk q8_0 -ctv turbo4`: Asymmetric TurboQuant KV cache keeps keys in 8-bit for precise attention routing while compressing values to 4-bit, fitting 1M within 128 GB unified memory.
 > - `-b 2048 -ub 2048`: Matching logical and physical micro-batch sizes maximizes ROCm HIP compute throughput during long-context prompt ingestion.
+> - **Hybrid Recurrent Checkpoints**: Qwen 3.8 (`qwen35`) combines SSM layers with attention, meaning KV cells cannot be arbitrarily shifted. Context reuse relies strictly on RAM checkpoints. `run_yarn_1m.sh` configures 128 checkpoints (`--ctx-checkpoints 128`) spaced every 2,048 tokens (`--checkpoint-every-n-tokens 2048`) with `--checkpoint-min-step 1024` and `--cache-ram 32768`, guaranteeing fast ~5s rollbacks without dropping prompt cache.
 > - **MTP Speculative Decoding**: Disabled by default in `run_yarn_1m.sh` (`--mtp` to enable) to prevent `spec-boundary-mismatch` prompt-cache cold fallbacks on multi-turn conversations.
 > - `--image-min-tokens 1024`: Ensures required vision grounding tokens for Qwen-VL multimodal inputs.
 
