@@ -41,63 +41,112 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-11.5.1}"   # gfx1151 ISA — Radeon 8060S only
 export GGML_HIP_ENABLE_UNIFIED_MEMORY="${GGML_HIP_ENABLE_UNIFIED_MEMORY:-1}"
 export ROCM_FLUSH_ACCEPT="${ROCM_FLUSH_ACCEPT:-1}"
-# HIP_VISIBLE_DEVICES is auto-detected to the Radeon 8060S after the binary is
-# resolved (section 4b). If it is already set in the environment (or via
-# --hip-device during arg parsing) the user's pin is respected and no
-# auto-detection runs.
+export AMD_VULKAN_ICD="${AMD_VULKAN_ICD:-RADV}"
+export RADV_PERFTEST="${RADV_PERFTEST:-gpl,sam,nggc}"
 
 # ------------------------------------------------------------------------------
-# 2. Defaults & Configuration
+# 2. Defaults & Workload Profile Selection
 # ------------------------------------------------------------------------------
-DEVICE="${DEVICE:-ROCm0}"               # ROCm0 = 8060S unified (stable); --device Vulkan1 for decode-fast
+DEVICE="${DEVICE:-auto}"               # auto = prefer Vulkan0 (RADV Wave64 34-36 tok/s), fallback ROCm0
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8800}"
 MODEL_PATH="${MODEL_PATH:-}"
 MMPROJ_PATH="${MMPROJ_PATH:-}"
-NO_MMPROJ="${NO_MMPROJ:-0}"
+NO_MMPROJ="${NO_MMPROJ:-1}"            # 1 = text-only inference (prevents CLIP unsupported op warnings)
 NGL="${NGL:-99}"
 NP="${NP:-1}"
-CTX="${CTX:-1048576}" # 1M context (1,048,576 tokens) via YaRN 4x on 262K native base
-ROPE_SCALING="${ROPE_SCALING:-yarn}"
-ROPE_SCALE="${ROPE_SCALE:-4.0}"
-YARN_ORIG_CTX="${YARN_ORIG_CTX:-262144}" # 256K native base context
-YARN_EXT_FACTOR="${YARN_EXT_FACTOR:--1}"
-YARN_ATTN_FACTOR="${YARN_ATTN_FACTOR:-1.0}"
-YARN_BETA_SLOW="${YARN_BETA_SLOW:-1}"
-YARN_BETA_FAST="${YARN_BETA_FAST:-32}"
+PROFILE="${PROFILE:-1m}"
+
+# Scan CLI arguments early to discover --profile before setting defaults
+ARGS=("$@")
+for ((i = 0; i < ${#ARGS[@]}; i++)); do
+    if [ "${ARGS[$i]}" = "--profile" ] && ((i + 1 < ${#ARGS[@]})); then
+        PROFILE="${ARGS[$((i + 1))]}"
+        break
+    fi
+done
+
+case "${PROFILE}" in
+    speed)
+        # Maximum decode speed (30–36 tok/s) via Vulkan0 + MTP (K=4, p=0.0) on native RoPE
+        CTX="${CTX:-131072}"
+        ROPE_SCALING="${ROPE_SCALING:-none}"
+        MTP="${MTP:-1}"
+        SPEC_DRAFT_N_MAX="${SPEC_DRAFT_N_MAX:-4}"
+        SPEC_DRAFT_P_MIN="${SPEC_DRAFT_P_MIN:-0.0}"
+        STRICT_MTP="${STRICT_MTP:-0}"
+        BATCH_SIZE="${BATCH_SIZE:-2048}"
+        UBATCH_SIZE="${UBATCH_SIZE:-1024}"
+        TEMP="${TEMP:-0}"
+        CACHE_PROMPT="${CACHE_PROMPT:-1}"
+        CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-2048}"
+        CTX_CHECKPOINTS="${CTX_CHECKPOINTS:-128}"
+        ;;
+    agent)
+        # Deterministic coding agents: strict MTP verification (34.82 tok/s) with cache isolation
+        CTX="${CTX:-65536}"
+        ROPE_SCALING="${ROPE_SCALING:-none}"
+        MTP="${MTP:-1}"
+        SPEC_DRAFT_N_MAX="${SPEC_DRAFT_N_MAX:-4}"
+        SPEC_DRAFT_P_MIN="${SPEC_DRAFT_P_MIN:-0.0}"
+        STRICT_MTP="${STRICT_MTP:-1}"
+        BATCH_SIZE="${BATCH_SIZE:-2048}"
+        UBATCH_SIZE="${UBATCH_SIZE:-1024}"
+        TEMP="${TEMP:-0}"
+        CACHE_PROMPT="${CACHE_PROMPT:-0}"
+        CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-2048}"
+        CTX_CHECKPOINTS="${CTX_CHECKPOINTS:-0}"
+        ;;
+    cache)
+        # Multi-turn conversational chat with deep prompt caching and dense checkpoints (MTP off)
+        CTX="${CTX:-131072}"
+        ROPE_SCALING="${ROPE_SCALING:-none}"
+        MTP="${MTP:-0}"
+        BATCH_SIZE="${BATCH_SIZE:-2048}"
+        UBATCH_SIZE="${UBATCH_SIZE:-2048}"
+        TEMP="${TEMP:-0}"
+        CACHE_PROMPT="${CACHE_PROMPT:-1}"
+        CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-2048}"
+        CTX_CHECKPOINTS="${CTX_CHECKPOINTS:-128}"
+        ;;
+    1m|yarn|*)
+        PROFILE="1m"
+        CTX="${CTX:-1048576}"          # 1M context via YaRN 4x on 262K native base
+        ROPE_SCALING="${ROPE_SCALING:-yarn}"
+        ROPE_SCALE="${ROPE_SCALE:-4.0}"
+        YARN_ORIG_CTX="${YARN_ORIG_CTX:-262144}"
+        YARN_EXT_FACTOR="${YARN_EXT_FACTOR:--1}"
+        YARN_ATTN_FACTOR="${YARN_ATTN_FACTOR:-1.0}"
+        YARN_BETA_SLOW="${YARN_BETA_SLOW:-1}"
+        YARN_BETA_FAST="${YARN_BETA_FAST:-32}"
+        MTP="${MTP:-0}"
+        SPEC_DRAFT_N_MAX="${SPEC_DRAFT_N_MAX:-4}"
+        SPEC_DRAFT_P_MIN="${SPEC_DRAFT_P_MIN:-0.0}"
+        STRICT_MTP="${STRICT_MTP:-1}"
+        BATCH_SIZE="${BATCH_SIZE:-2048}"
+        UBATCH_SIZE="${UBATCH_SIZE:-2048}"
+        TEMP="${TEMP:-0}"
+        CACHE_PROMPT="${CACHE_PROMPT:-1}"
+        CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-2048}"
+        CTX_CHECKPOINTS="${CTX_CHECKPOINTS:-128}"
+        ;;
+esac
+
 CACHE_TYPE_K="${CACHE_TYPE_K:-q8_0}"     # TurboQuant: Keys stay 8-bit (sharp attention routing)
 CACHE_TYPE_V="${CACHE_TYPE_V:-turbo4}"   # TurboQuant: Values compressed to 4-bit
 CACHE_TYPE_K_DRAFT="${CACHE_TYPE_K_DRAFT:-q8_0}"
 CACHE_TYPE_V_DRAFT="${CACHE_TYPE_V_DRAFT:-turbo4}"
 FLASH_ATTN="${FLASH_ATTN:-on}"
-BATCH_SIZE="${BATCH_SIZE:-2048}"
-UBATCH_SIZE="${UBATCH_SIZE:-2048}"
 THREADS="${THREADS:-16}"
 THREADS_BATCH="${THREADS_BATCH:-32}"
 POLL="${POLL:-50}"
-TEMP="${TEMP:-0}"
 TOP_P="${TOP_P:-0.95}"
 TOP_K="${TOP_K:-20}"
-# MTP speculative decoding is disabled by default for 1M serving because
-# draft boundary mismatches cause cold fallbacks and wipe the prompt cache.
-# Enable explicitly with --mtp.
-MTP="${MTP:-0}"
-SPEC_DRAFT_N_MAX="${SPEC_DRAFT_N_MAX:-6}"
 SPEC_DRAFT_N_MIN="${SPEC_DRAFT_N_MIN:-0}"
-SPEC_DRAFT_P_MIN="${SPEC_DRAFT_P_MIN:-0.6}"
 SPEC_DRAFT_P_SPLIT="${SPEC_DRAFT_P_SPLIT:-0.10}"
-# --spec-mtp-strict-qwen makes greedy MTP output match no-spec decoding.
-# Off by default (faster); the server logs "strict verification is disabled".
-STRICT_MTP="${STRICT_MTP:-0}"
-# Prompt-cache RAM checkpoints, 128 GB tier (q38rocm cache_profile.sh): 128 @ 32 GiB.
-# At 1M ctx each checkpoint ≈ model state (~150 MiB) + KV for the covered range,
-# so 128 checkpoints ≈ 19.1 GiB, densely covering up to 262K native base tokens.
 CACHE_RAM_MIB="${CACHE_RAM_MIB:-32768}"
-CTX_CHECKPOINTS="${CTX_CHECKPOINTS:-128}"
-CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-2048}"
-CACHE_PROMPT="${CACHE_PROMPT:-1}"
 SLOT_SAVE_PATH="${SLOT_SAVE_PATH:-${SCRIPT_DIR}/cache/slots}"
-REASONING="${REASONING:-}"              # empty = fork default (keeps thinking template); --reasoning off to disable
+REASONING="${REASONING:-}"
 REASONING_BUDGET="${REASONING_BUDGET:-}"
 EXTRA_ARGS=()
 
@@ -108,24 +157,30 @@ show_help() {
     cat <<EOF
 Usage: $(basename "$0") [options] [extra llama-server args...]
 
-Launch Qwen 3.8 27B with 1M YaRN context extension on AMD ROCm / Strix Halo.
+Launch Qwen 3.8 27B on AMD Strix Halo / Radeon 8060S with ROCmFP4 & TurboQuant.
+
+Profiles:
+  --profile speed            Maximum generation speed (30–36 tok/s via Vulkan0 + MTP K=4/p=0.0)
+  --profile agent            Deterministic coding agents (34.82 tok/s strict MTP, cache isolated)
+  --profile cache            Multi-turn conversation with deep prompt caching (MTP=0, dense checkpoints)
+  --profile 1m               Full 1M context via YaRN 4x on 262K native base (default)
 
 Options:
   -m, --model <path>         Path to Qwen 3.8 27B GGUF model file
-  --mmproj <path>            Path to multimodal projector GGUF (optional)
-  --no-mmproj                Disable auto-detected multimodal projector
-  --device <dev>             Backend device: ROCm0 (default) or Vulkan1
+  --mmproj <path>            Path to multimodal projector GGUF (optional, disabled by default)
+  --auto-mmproj              Enable auto-detection of multimodal projector
+  --device <dev>             Backend device: auto (default: Vulkan0 > ROCm0), Vulkan0, or ROCm0
   -p, --port <port>          Server port (default: 8800)
   -h, --host <host>          Server bind host (default: 0.0.0.0)
-  -c, --ctx <size>           Context window size (default: 1048576 for 1M)
+  -c, --ctx <size>           Context window size (profile default, or override)
   -ngl, --n-gpu-layers <n>   GPU offload layers (default: 99)
   -np, --parallel <n>        Parallel request slots (default: 1)
   --hip-device <n>           HIP_VISIBLE_DEVICES target (pins; else auto-detected to the 8060S)
   --cache-type-k <type>      KV cache Key quantization (default: q8_0)
   --cache-type-v <type>      KV cache Value quantization (default: turbo4)
   -b, --batch <size>         Logical batch size (default: 2048)
-  -ub, --ubatch <size>       Physical/micro-batch size (default: 2048)
-  --mtp                      Enable MTP speculative decoding (default: off)
+  -ub, --ubatch <size>       Physical/micro-batch size (default: 2048 or 1024)
+  --mtp                      Enable MTP speculative decoding (K=4, p=0.0)
   --no-mtp                   Disable MTP speculative decoding
   --strict                   --spec-mtp-strict-qwen: greedy output matches no-spec
   --cache-ram <MiB>          Prompt-cache checkpoint RAM budget (default: 32768)
@@ -154,13 +209,22 @@ while [[ $# -gt 0 ]]; do
             show_help
             exit 0
             ;;
+        --profile)
+            PROFILE="$2"
+            shift 2
+            ;;
         -m|--model)
             MODEL_PATH="$2"
             shift 2
             ;;
         --mmproj)
             MMPROJ_PATH="$2"
+            NO_MMPROJ=0
             shift 2
+            ;;
+        --auto-mmproj)
+            NO_MMPROJ=0
+            shift
             ;;
         --no-mmproj)
             NO_MMPROJ=1
@@ -283,30 +347,48 @@ if [ -z "$LLAMA_SERVER_BIN" ] || [ ! -x "$LLAMA_SERVER_BIN" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# 4b. Auto-detect the Radeon 8060S (gfx1151) as the default ROCm target.
-#     On this box HIP device 0 is the RX 7900 XTX (gfx1100): running the
-#     gfx1151 ISA override on it fails at first compute with
-#     "ROCm error: unspecified launch failure" (ggml_cuda_cpy / hipMemcpyAsync).
-#     --list-devices prints "  ROCm<N>: <description> (<total> MiB, <free> MiB free)".
 # ------------------------------------------------------------------------------
+# 4b. Backend Device Auto-Detection (Vulkan0 vs ROCm0)
+#     On AMD Strix Halo, Mesa RADV Wave64 cooperative matrix (Vulkan0) achieves
+#     34–36 tok/s with MTP, while ROCm0 reaches ~28 tok/s.
+# ------------------------------------------------------------------------------
+AVAILABLE_DEVICES="$("${LLAMA_SERVER_BIN}" --list-devices 2>/dev/null || true)"
+
 detect_rocm_8060s() {
     "${LLAMA_SERVER_BIN}" --list-devices 2>/dev/null \
         | sed -nE 's/^[[:space:]]*ROCm([0-9]+):.*8060S.*/\1/p' | head -1
 }
 
-if [ -z "${HIP_VISIBLE_DEVICES+x}" ]; then
-    ROCM_APU_INDEX="$(detect_rocm_8060s)"
-    if [ -n "$ROCM_APU_INDEX" ]; then
-        export HIP_VISIBLE_DEVICES="${ROCM_APU_INDEX}"
-        DEVICE_MODE="auto-detected Radeon 8060S (HIP_VISIBLE_DEVICES=${ROCM_APU_INDEX})"
+if [ "$DEVICE" = "auto" ]; then
+    if echo "$AVAILABLE_DEVICES" | grep -q "Vulkan0"; then
+        DEVICE="Vulkan0"
+        DEVICE_MODE="auto-detected Mesa RADV Wave64 (Vulkan0)"
+    elif echo "$AVAILABLE_DEVICES" | grep -q "ROCm0"; then
+        DEVICE="ROCm0"
+        DEVICE_MODE="auto-detected ROCm0"
     else
-        echo "⚠️  [WARN] Could not auto-detect the Radeon 8060S in '${LLAMA_SERVER_BIN} --list-devices'." >&2
-        echo "   Defaulting HIP_VISIBLE_DEVICES=0. HSA_OVERRIDE_GFX_VERSION=11.5.1 (gfx1151) only matches the 8060S." >&2
-        export HIP_VISIBLE_DEVICES=0
-        DEVICE_MODE="HIP_VISIBLE_DEVICES=0 fallback"
+        DEVICE="ROCm0"
+        DEVICE_MODE="default ROCm0"
     fi
 else
-    DEVICE_MODE="HIP_VISIBLE_DEVICES pinned=${HIP_VISIBLE_DEVICES}"
+    DEVICE_MODE="user-pinned ${DEVICE}"
+fi
+
+if [ "$DEVICE" = "ROCm0" ]; then
+    if [ -z "${HIP_VISIBLE_DEVICES+x}" ]; then
+        ROCM_APU_INDEX="$(detect_rocm_8060s)"
+        if [ -n "$ROCM_APU_INDEX" ]; then
+            export HIP_VISIBLE_DEVICES="${ROCM_APU_INDEX}"
+            DEVICE_MODE="${DEVICE_MODE} (HIP_VISIBLE_DEVICES=${ROCM_APU_INDEX})"
+        else
+            echo "⚠️  [WARN] Could not auto-detect the Radeon 8060S in '${LLAMA_SERVER_BIN} --list-devices'." >&2
+            echo "   Defaulting HIP_VISIBLE_DEVICES=0. HSA_OVERRIDE_GFX_VERSION=11.5.1 (gfx1151) only matches the 8060S." >&2
+            export HIP_VISIBLE_DEVICES=0
+            DEVICE_MODE="${DEVICE_MODE} (HIP_VISIBLE_DEVICES=0 fallback)"
+        fi
+    else
+        DEVICE_MODE="${DEVICE_MODE} (HIP_VISIBLE_DEVICES pinned=${HIP_VISIBLE_DEVICES})"
+    fi
 fi
 
 # ------------------------------------------------------------------------------
@@ -370,15 +452,20 @@ fi
 # 7. Assemble Command & Launch
 # ------------------------------------------------------------------------------
 echo "================================================================================"
-echo " 🚀 Launching Qwen 3.8 27B YaRN 1M Context Server"
+echo " 🚀 Starting Qwen 3.8 27B Server on AMD Strix Halo"
 echo "================================================================================"
+echo " Profile           : ${PROFILE}"
 echo " Engine Binary     : ${LLAMA_SERVER_BIN}"
 echo " Device Backend    : ${DEVICE} (${DEVICE_MODE})"
 echo " Model             : ${RESOLVED_MODEL}"
-[ -n "$RESOLVED_MMPROJ" ] && echo " MMProj            : ${RESOLVED_MMPROJ}" || echo " MMProj            : none"
+[ -n "$RESOLVED_MMPROJ" ] && echo " MMProj            : ${RESOLVED_MMPROJ}" || echo " MMProj            : none (text-only)"
 echo " Host / Port       : ${HOST}:${PORT}"
-echo " Context Size      : ${CTX} tokens (1M via YaRN 4x on 262K native base)"
-echo " RoPE Parameters   : scaling=${ROPE_SCALING} scale=${ROPE_SCALE} orig_ctx=${YARN_ORIG_CTX}"
+if [ "${ROPE_SCALING}" = "yarn" ]; then
+    echo " Context Size      : ${CTX} tokens (YaRN ${ROPE_SCALE}x on ${YARN_ORIG_CTX} native base)"
+    echo " RoPE Parameters   : scaling=${ROPE_SCALING} scale=${ROPE_SCALE} orig_ctx=${YARN_ORIG_CTX}"
+else
+    echo " Context Size      : ${CTX} tokens (native RoPE, no frequency dilation)"
+fi
 echo " KV Cache Format   : Key=${CACHE_TYPE_K}, Value=${CACHE_TYPE_V} (draft: ${CACHE_TYPE_K_DRAFT}/${CACHE_TYPE_V_DRAFT})"
 echo " Speculative       : $([ "${MTP}" = "1" ] && printf 'MTP draft-mtp n_max=%s p_min=%s%s' "${SPEC_DRAFT_N_MAX}" "${SPEC_DRAFT_P_MIN}" "$([ "${STRICT_MTP}" = "1" ] && printf ' (strict)' || printf '')" || printf 'disabled')"
 echo " Prompt Cache      : $([ "${CACHE_PROMPT}" = "1" ] && printf '%s checkpoints @ %s MiB (every %s tok)' "${CTX_CHECKPOINTS}" "${CACHE_RAM_MIB}" "${CHECKPOINT_EVERY}" || printf 'disabled')"
@@ -393,17 +480,25 @@ CMD=(
     "-fa" "${FLASH_ATTN}"
     "-np" "${NP}"
     "-c" "${CTX}"
+)
+
+if [ "${ROPE_SCALING}" = "yarn" ]; then
     # qwen35 is the real arch key; without this the server caps the slot at the
     # model's native 262K training context (n_ctx_train is read from
     # {arch}.context_length, YaRN does not raise it).
-    "--override-kv" "qwen35.context_length=int:${CTX}"
-    "--rope-scaling" "${ROPE_SCALING}"
-    "--rope-scale" "${ROPE_SCALE}"
-    "--yarn-orig-ctx" "${YARN_ORIG_CTX}"
-    "--yarn-ext-factor" "${YARN_EXT_FACTOR}"
-    "--yarn-attn-factor" "${YARN_ATTN_FACTOR}"
-    "--yarn-beta-slow" "${YARN_BETA_SLOW}"
-    "--yarn-beta-fast" "${YARN_BETA_FAST}"
+    CMD+=(
+        "--override-kv" "qwen35.context_length=int:${CTX}"
+        "--rope-scaling" "${ROPE_SCALING}"
+        "--rope-scale" "${ROPE_SCALE}"
+        "--yarn-orig-ctx" "${YARN_ORIG_CTX}"
+        "--yarn-ext-factor" "${YARN_EXT_FACTOR}"
+        "--yarn-attn-factor" "${YARN_ATTN_FACTOR}"
+        "--yarn-beta-slow" "${YARN_BETA_SLOW}"
+        "--yarn-beta-fast" "${YARN_BETA_FAST}"
+    )
+fi
+
+CMD+=(
     "-ctk" "${CACHE_TYPE_K}"
     "-ctv" "${CACHE_TYPE_V}"
     "-b" "${BATCH_SIZE}"

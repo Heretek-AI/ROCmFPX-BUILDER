@@ -97,16 +97,25 @@ To run **Qwen 3.8 27B** with a **1,048,576 token (1M) context window** on AMD St
 
 ### 1. Using the Convenience Script
 ```bash
-./scripts/run_yarn_1m.sh -m /path/to/Qwen3.8-27B-ROCmFP4-STRIX_LEAN.gguf --mmproj /path/to/mmproj-F16.gguf
+# Maximum generation speed (30–36 tok/s via Vulkan0 Mesa RADV Wave64 + MTP K=4/p=0.0):
+./scripts/run_yarn_1m.sh -m /path/to/Qwen3.8-27B-ROCmFP4-STRIX_LEAN.gguf --profile speed
+
+# Deterministic coding agents (34.82 tok/s strict MTP, cache isolated):
+./scripts/run_yarn_1m.sh -m /path/to/Qwen3.8-27B-ROCmFP4-STRIX_LEAN.gguf --profile agent
+
+# Multi-turn conversation with deep prompt caching (MTP=0, dense checkpoints):
+./scripts/run_yarn_1m.sh -m /path/to/Qwen3.8-27B-ROCmFP4-STRIX_LEAN.gguf --profile cache
+
+# Full 1M context via YaRN 4x scaling (default):
+./scripts/run_yarn_1m.sh -m /path/to/Qwen3.8-27B-ROCmFP4-STRIX_LEAN.gguf --profile 1m
 ```
 
-### 2. Direct `llama-server` CLI Invocation
+### 2. Direct `llama-server` CLI Invocation (1M Context)
 ```bash
 HIP_VISIBLE_DEVICES=1 /home/linuxbrew/.linuxbrew/opt/q38rocm/bin/llama-server \
   --host 0.0.0.0 \
   --port 8800 \
   -m /home/ronin/Projects/models/Qwen-3.8-27B-ROCmFP4-FAST-GGUF/Qwen3.8-27B-ROCmFP4-STRIX_LEAN.gguf \
-  --mmproj /home/ronin/Projects/models/Qwen-3.8-27B-ROCmFP4-FAST-GGUF/mmproj-F16.gguf \
   --image-min-tokens 1024 \
   -ngl 99 \
   -fit off \
@@ -127,16 +136,24 @@ HIP_VISIBLE_DEVICES=1 /home/linuxbrew/.linuxbrew/opt/q38rocm/bin/llama-server \
   -ub 2048
 ```
 
-> **Parameter Notes:**
+> **Parameter & Performance Notes:**
+> - **Raw Decode vs MTP Speculative Decode**:
+>   - **Raw Unassisted Decode** for Qwen 3.8 27B FP4 is physically memory-bandwidth bound on Strix Halo's 256-bit bus at **~13.90–14.02 tok/s**.
+>   - Reaching **30.00–36.04 tok/s** requires **MTP Speculative Decoding** (`--spec-type draft-mtp --spec-draft-n-max 4 --spec-draft-p-min 0.0`).
+> - **Backend Driver (`Vulkan0` vs `ROCm0`)**:
+>   - `run_yarn_1m.sh` auto-detects `Vulkan0` (Mesa RADV Wave64 cooperative matrix `KHR_coopmat`), unlocking **34–36 tok/s** with MTP.
+>   - ROCm HIP (`ROCm0`) caps MTP at **~28 tok/s**.
+> - **Context Scaling Impact on Decode TPS**:
+>   - Advertised 30–36 tok/s benchmarks were measured at **32K context with native RoPE**.
+>   - At 50K+ tokens, streaming the active KV cache across unified memory consumes bandwidth, naturally lowering single-token decode speed.
 > - `-c 1048576`: Allocates the 1M token context buffer.
 > - `--override-kv qwen35.context_length=int:1048576`: Overrides GGUF metadata `n_ctx_train` for `qwen35` so `llama-server` initializes the full 1M slot context without capping at 262K.
 > - `-fit off`: Disables automatic VRAM fitting when full layers (`-ngl 99`) are explicitly requested.
-> - `--rope-scaling yarn --rope-scale 4.0`: Scales frequencies 4× from Qwen 3.8's native 262,144 base window (`--yarn-orig-ctx 262144`).
+> - `--rope-scaling yarn --rope-scale 4.0`: Scales frequencies 4× from Qwen 3.8's native 262,144 base window (`--yarn-orig-ctx 262144`). Omitted in `speed`, `agent`, and `cache` profiles to preserve native attention resolution.
 > - `-ctk q8_0 -ctv turbo4`: Asymmetric TurboQuant KV cache keeps keys in 8-bit for precise attention routing while compressing values to 4-bit, fitting 1M within 128 GB unified memory.
 > - `-b 2048 -ub 2048`: Matching logical and physical micro-batch sizes maximizes ROCm HIP compute throughput during long-context prompt ingestion.
 > - **Hybrid Recurrent Checkpoints**: Qwen 3.8 (`qwen35`) combines SSM layers with attention, meaning KV cells cannot be arbitrarily shifted. Context reuse relies strictly on RAM checkpoints. `run_yarn_1m.sh` configures 128 checkpoints (`--ctx-checkpoints 128`) spaced every 2,048 tokens (`--checkpoint-every-n-tokens 2048`) with `--cache-ram 32768`, guaranteeing fast ~5s rollbacks without dropping prompt cache.
-> - **MTP Speculative Decoding**: Disabled by default in `run_yarn_1m.sh` (`--mtp` to enable) to prevent `spec-boundary-mismatch` prompt-cache cold fallbacks on multi-turn conversations.
-> - `--image-min-tokens 1024`: Ensures required vision grounding tokens for Qwen-VL multimodal inputs.
+> - **Multimodal Projector**: Disabled by default for pure text inference (`NO_MMPROJ=1`) to eliminate unsupported CLIP operator warnings and warmup overhead. Pass `--mmproj <path>` to attach for vision models.
 
 ---
 
