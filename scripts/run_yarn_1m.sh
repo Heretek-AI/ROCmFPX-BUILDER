@@ -14,11 +14,17 @@
 #     silently capped the slot at it ("...exceeds the training context...capping").
 #   * TurboQuant KV (q8_0 K / turbo4 V) — the upstream-validated long-context
 #     recipe for this model family.
-#   * MTP speculative decode (n_max 6 / p_min 0.6) — ROCmFPX-measured dense-27B
-#     sweet spot (~2.4-2.9x decode). Build 244 ships the mtp-prompt-cache-fix.
-#   * RAM context checkpoints sized for 1M on a 128 GB box (64 cps @ 32 GiB).
+#   * MTP speculative decode: disabled by default for 1M context serving.
+#     Speculative draft boundary mismatches (spec-boundary-mismatch) trigger
+#     prompt-cache cold fallbacks (target-draft-restore-rejected), completely
+#     erasing slot KV cache and wiping checkpoints, forcing multi-minute
+#     prefill re-evaluations. Enable explicitly with --mtp if desired.
+#   * RAM context checkpoints sized for 1M on a 128 GB box (64 cps @ 32 GiB,
+#     spaced every 16,384 tokens to avoid frequent serialization pauses during prefill).
 #     Note: cache-reuse / KV-shifting is inherently disabled by the hybrid
 #     recurrent architecture — RAM checkpoints are the only reuse path.
+#   * Physical micro-batch (ubatch) set to 2048 to match logical batch for peak
+#     ROCm compute throughput during long-context prompt ingestion.
 #   * Strix Halo env (HSA_OVERRIDE_GFX_VERSION, unified memory) + -dev ROCm0.
 # ==============================================================================
 
@@ -62,16 +68,17 @@ CACHE_TYPE_K_DRAFT="${CACHE_TYPE_K_DRAFT:-q8_0}"
 CACHE_TYPE_V_DRAFT="${CACHE_TYPE_V_DRAFT:-turbo4}"
 FLASH_ATTN="${FLASH_ATTN:-on}"
 BATCH_SIZE="${BATCH_SIZE:-2048}"
-UBATCH_SIZE="${UBATCH_SIZE:-1024}"
+UBATCH_SIZE="${UBATCH_SIZE:-2048}"
 THREADS="${THREADS:-16}"
 THREADS_BATCH="${THREADS_BATCH:-32}"
 POLL="${POLL:-50}"
 TEMP="${TEMP:-0}"
 TOP_P="${TOP_P:-0.95}"
 TOP_K="${TOP_K:-20}"
-# MTP speculative decoding (model exposes an MTP head). n6/p0.6 is the
-# ROCmFPX-measured dense-27B sweet spot. Disable with --no-mtp.
-MTP="${MTP:-1}"
+# MTP speculative decoding is disabled by default for 1M serving because
+# draft boundary mismatches cause cold fallbacks and wipe the prompt cache.
+# Enable explicitly with --mtp.
+MTP="${MTP:-0}"
 SPEC_DRAFT_N_MAX="${SPEC_DRAFT_N_MAX:-6}"
 SPEC_DRAFT_N_MIN="${SPEC_DRAFT_N_MIN:-0}"
 SPEC_DRAFT_P_MIN="${SPEC_DRAFT_P_MIN:-0.6}"
@@ -84,7 +91,7 @@ STRICT_MTP="${STRICT_MTP:-0}"
 # so 32 GiB holds a handful of near-1M checkpoints — raise CACHE_RAM_MIB for more.
 CACHE_RAM_MIB="${CACHE_RAM_MIB:-32768}"
 CTX_CHECKPOINTS="${CTX_CHECKPOINTS:-64}"
-CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-4096}"
+CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-16384}"
 CACHE_PROMPT="${CACHE_PROMPT:-1}"
 SLOT_SAVE_PATH="${SLOT_SAVE_PATH:-${SCRIPT_DIR}/cache/slots}"
 REASONING="${REASONING:-}"              # empty = fork default (keeps thinking template); --reasoning off to disable
@@ -114,11 +121,13 @@ Options:
   --cache-type-k <type>      KV cache Key quantization (default: q8_0)
   --cache-type-v <type>      KV cache Value quantization (default: turbo4)
   -b, --batch <size>         Logical batch size (default: 2048)
-  -ub, --ubatch <size>       Physical/micro-batch size (default: 1024)
-  --no-mtp                   Disable MTP speculative decoding (default: on)
+  -ub, --ubatch <size>       Physical/micro-batch size (default: 2048)
+  --mtp                      Enable MTP speculative decoding (default: off)
+  --no-mtp                   Disable MTP speculative decoding
   --strict                   --spec-mtp-strict-qwen: greedy output matches no-spec
   --cache-ram <MiB>          Prompt-cache checkpoint RAM budget (default: 32768)
   --ctx-checkpoints <n>      Number of RAM context checkpoints (default: 64)
+  --checkpoint-every <n>     Tokens between context checkpoints (default: 16384)
   --no-cache-prompt          Disable prompt caching / checkpoints
   --reasoning <on|off|auto>  Thinking mode (default: fork default)
   --reasoning-budget <n>     Thinking token budget (-1 = unlimited)
@@ -198,6 +207,10 @@ while [[ $# -gt 0 ]]; do
             UBATCH_SIZE="$2"
             shift 2
             ;;
+        --mtp)
+            MTP=1
+            shift
+            ;;
         --no-mtp)
             MTP=0
             shift
@@ -212,6 +225,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --ctx-checkpoints)
             CTX_CHECKPOINTS="$2"
+            shift 2
+            ;;
+        --checkpoint-every)
+            CHECKPOINT_EVERY="$2"
             shift 2
             ;;
         --no-cache-prompt)

@@ -112,7 +112,7 @@ HIP_VISIBLE_DEVICES=1 /home/linuxbrew/.linuxbrew/opt/q38rocm/bin/llama-server \
   -fit off \
   -np 1 \
   -c 1048576 \
-  --override-kv qwen2.context_length=int:1048576,qwen2vl.context_length=int:1048576,qwen3.context_length=int:1048576 \
+  --override-kv qwen35.context_length=int:1048576 \
   --rope-scaling yarn \
   --rope-scale 4.0 \
   --yarn-orig-ctx 262144 \
@@ -120,19 +120,21 @@ HIP_VISIBLE_DEVICES=1 /home/linuxbrew/.linuxbrew/opt/q38rocm/bin/llama-server \
   --yarn-attn-factor 1.0 \
   --yarn-beta-slow 1 \
   --yarn-beta-fast 32 \
-  --cache-type-k q4_0 \
-  --cache-type-v q4_0 \
+  -ctk q8_0 \
+  -ctv turbo4 \
   -fa on \
   -b 2048 \
-  -ub 512
+  -ub 2048
 ```
 
 > **Parameter Notes:**
 > - `-c 1048576`: Allocates the 1M token context buffer.
-> - `--override-kv qwen2.context_length=int:1048576...`: Overrides GGUF metadata `n_ctx_train` so `llama-server` initializes the full 1M slot context without capping at 262K.
+> - `--override-kv qwen35.context_length=int:1048576`: Overrides GGUF metadata `n_ctx_train` for `qwen35` so `llama-server` initializes the full 1M slot context without capping at 262K.
 > - `-fit off`: Disables automatic VRAM fitting when full layers (`-ngl 99`) are explicitly requested.
 > - `--rope-scaling yarn --rope-scale 4.0`: Scales frequencies 4× from Qwen 3.8's native 262,144 base window (`--yarn-orig-ctx 262144`).
-> - `--cache-type-k q4_0 --cache-type-v q4_0`: 4-bit KV cache reduces memory footprint to ~40 GB, easily fitting within 128 GB unified memory on AMD Strix Halo (Ryzen AI Max+ 395).
+> - `-ctk q8_0 -ctv turbo4`: Asymmetric TurboQuant KV cache keeps keys in 8-bit for precise attention routing while compressing values to 4-bit, fitting 1M within 128 GB unified memory.
+> - `-b 2048 -ub 2048`: Matching logical and physical micro-batch sizes maximizes ROCm HIP compute throughput during long-context prompt ingestion.
+> - **MTP Speculative Decoding**: Disabled by default in `run_yarn_1m.sh` (`--mtp` to enable) to prevent `spec-boundary-mismatch` prompt-cache cold fallbacks on multi-turn conversations.
 > - `--image-min-tokens 1024`: Ensures required vision grounding tokens for Qwen-VL multimodal inputs.
 
 ---
