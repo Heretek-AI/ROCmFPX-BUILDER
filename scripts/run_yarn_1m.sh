@@ -20,7 +20,7 @@
 #     erasing slot KV cache and wiping checkpoints, forcing multi-minute
 #     prefill re-evaluations. Enable explicitly with --mtp if desired.
 #   * RAM context checkpoints: 128 checkpoints @ 32 GiB (spaced every 2,048
-#     tokens with --checkpoint-min-step 1024).
+#     tokens).
 #     CRITICAL FOR HYBRID RECURRENT (qwen35): SSM layers cannot arbitrarily shift
 #     KV cells. Checkpoints are the ONLY mechanism for context reuse. Dense 2K
 #     checkpoints ensure any branching prompt or multi-turn chat rolls back in
@@ -95,7 +95,6 @@ STRICT_MTP="${STRICT_MTP:-0}"
 CACHE_RAM_MIB="${CACHE_RAM_MIB:-32768}"
 CTX_CHECKPOINTS="${CTX_CHECKPOINTS:-128}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-2048}"
-CHECKPOINT_MIN_STEP="${CHECKPOINT_MIN_STEP:-1024}"
 CACHE_PROMPT="${CACHE_PROMPT:-1}"
 SLOT_SAVE_PATH="${SLOT_SAVE_PATH:-${SCRIPT_DIR}/cache/slots}"
 REASONING="${REASONING:-}"              # empty = fork default (keeps thinking template); --reasoning off to disable
@@ -132,7 +131,6 @@ Options:
   --cache-ram <MiB>          Prompt-cache checkpoint RAM budget (default: 32768)
   --ctx-checkpoints <n>      Number of RAM context checkpoints (default: 128)
   --checkpoint-every <n>     Tokens between context checkpoints (default: 2048)
-  --checkpoint-min-step <n>  Minimum tokens between checkpoints (default: 1024)
   --no-cache-prompt          Disable prompt caching / checkpoints
   --reasoning <on|off|auto>  Thinking mode (default: fork default)
   --reasoning-budget <n>     Thinking token budget (-1 = unlimited)
@@ -234,10 +232,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --checkpoint-every)
             CHECKPOINT_EVERY="$2"
-            shift 2
-            ;;
-        --checkpoint-min-step)
-            CHECKPOINT_MIN_STEP="$2"
             shift 2
             ;;
         --no-cache-prompt)
@@ -387,7 +381,7 @@ echo " Context Size      : ${CTX} tokens (1M via YaRN 4x on 262K native base)"
 echo " RoPE Parameters   : scaling=${ROPE_SCALING} scale=${ROPE_SCALE} orig_ctx=${YARN_ORIG_CTX}"
 echo " KV Cache Format   : Key=${CACHE_TYPE_K}, Value=${CACHE_TYPE_V} (draft: ${CACHE_TYPE_K_DRAFT}/${CACHE_TYPE_V_DRAFT})"
 echo " Speculative       : $([ "${MTP}" = "1" ] && printf 'MTP draft-mtp n_max=%s p_min=%s%s' "${SPEC_DRAFT_N_MAX}" "${SPEC_DRAFT_P_MIN}" "$([ "${STRICT_MTP}" = "1" ] && printf ' (strict)' || printf '')" || printf 'disabled')"
-echo " Prompt Cache      : $([ "${CACHE_PROMPT}" = "1" ] && printf '%s checkpoints @ %s MiB (every %s tok, min step %s)' "${CTX_CHECKPOINTS}" "${CACHE_RAM_MIB}" "${CHECKPOINT_EVERY}" "${CHECKPOINT_MIN_STEP}" || printf 'disabled')"
+echo " Prompt Cache      : $([ "${CACHE_PROMPT}" = "1" ] && printf '%s checkpoints @ %s MiB (every %s tok)' "${CTX_CHECKPOINTS}" "${CACHE_RAM_MIB}" "${CHECKPOINT_EVERY}" || printf 'disabled')"
 echo " Batching          : logical=${BATCH_SIZE}, physical=${UBATCH_SIZE}, threads=${THREADS}/${THREADS_BATCH}"
 echo "================================================================================"
 
@@ -440,7 +434,6 @@ if [ "${CACHE_PROMPT}" = "1" ]; then
         "--cache-ram" "${CACHE_RAM_MIB}"
         "--ctx-checkpoints" "${CTX_CHECKPOINTS}"
         "--checkpoint-every-n-tokens" "${CHECKPOINT_EVERY}"
-        "--checkpoint-min-step" "${CHECKPOINT_MIN_STEP}"
         "--slot-save-path" "${SLOT_SAVE_PATH}"
     )
 else
