@@ -1,0 +1,454 @@
+name: Build ROCmFPX (kingjones30) + ROCm
+on:
+  workflow_dispatch:
+    inputs:
+      operating_systems:
+        description: 'Operating systems to build for (comma-separated: ubuntu)'
+        required: false
+        default: 'ubuntu'
+      gfx_target:
+        description: 'AMD GPU targets (comma-separated; use "multiarch" for combined gfx1100+gfx1151)'
+        required: false
+        default: 'gfx1151,gfx1150,gfx120X,gfx110X,gfx103X,gfx90a,gfx908,multiarch'
+      rocm_version:
+        description: 'ROCm version to use (e.g., 7.15.0a20260718) or "latest" to auto-detect'
+        required: false
+        default: 'latest'
+      rocmfpx_repo:
+        description: 'ROCmFPX repository (owner/repo)'
+        required: false
+        default: 'kingjones30/ROCmFPX'
+      rocmfpx_version:
+        description: 'ROCmFPX version (tag, branch, commit hash, or "main")'
+        required: false
+        default: 'main'
+      create_release:
+        description: 'Create a GitHub release after successful build'
+        required: false
+        default: true
+        type: boolean
+
+  # Trigger on pull requests modifying this workflow
+  pull_request:
+    paths:
+      - '.github/workflows/build-kingjones-rocmfpx.yml'
+
+  # Nightly build schedule at 15:00 UTC
+  schedule:
+    - cron: '0 15 * * *'
+
+env:
+  OPERATING_SYSTEMS: ${{ github.event.inputs.operating_systems || 'ubuntu' }}
+  GFX_TARGETS: ${{ github.event.inputs.gfx_target || 'gfx1151,gfx1150,gfx120X,gfx110X,gfx103X,gfx90a,gfx908,multiarch' }}
+  ROCM_VERSION: ${{ github.event.inputs.rocm_version || 'latest' }}
+  ROCMFPX_REPO: ${{ github.event.inputs.rocmfpx_repo || 'kingjones30/ROCmFPX' }}
+  ROCMFPX_VERSION: ${{ github.event.inputs.rocmfpx_version || 'main' }}
+
+jobs:
+  prepare-matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      ubuntu_matrix: ${{ steps.set-matrix.outputs.ubuntu_matrix }}
+      should_build_ubuntu: ${{ steps.set-matrix.outputs.should_build_ubuntu }}
+    steps:
+      - name: Set matrix
+        id: set-matrix
+        run: |
+          targets="${{ env.GFX_TARGETS }}"
+          operating_systems="${{ env.OPERATING_SYSTEMS }}"
+
+          echo "Input targets: $targets"
+          echo "Input operating systems: $operating_systems"
+
+          # Convert comma-separated targets into JSON array
+          matrix_targets=$(echo "$targets" \
+            | tr ',' '\n' \
+            | sed 's/^ *//;s/ *$//' \
+            | sed 's/^"//;s/"$//' \
+            | jq -R . \
+            | jq -s '{gfx_target: .}' \
+            | jq -c)
+
+          should_build_ubuntu="false"
+          if [[ "$operating_systems" == *"ubuntu"* ]]; then
+            should_build_ubuntu="true"
+            echo "ubuntu_matrix=$matrix_targets" >> $GITHUB_OUTPUT
+          fi
+
+          echo "should_build_ubuntu=$should_build_ubuntu" >> $GITHUB_OUTPUT
+          echo "Ubuntu build: $should_build_ubuntu"
+          echo "Generated matrix: $matrix_targets"
+
+  build-ubuntu:
+    runs-on: ubuntu-24.04
+    needs: prepare-matrix
+    if: needs.prepare-matrix.outputs.should_build_ubuntu == 'true'
+    strategy:
+      matrix: ${{fromJson(needs.prepare-matrix.outputs.ubuntu_matrix)}}
+      fail-fast: false
+    outputs:
+      rocm_version: ${{ steps.set-outputs.outputs.rocm_version }}
+      rocmfpx_commit_hash: ${{ steps.set-outputs.outputs.rocmfpx_commit_hash }}
+
+    steps:
+      - name: Free disk space
+        run: curl -fsSL https://raw.githubusercontent.com/kou/arrow/e49d8ae15583ceff03237571569099a6ad62be32/ci/scripts/util_free_space.sh | bash
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Clean up workspace
+        run: |
+          if [ -d "ROCmFPX" ]; then rm -rf ROCmFPX; fi
+          if [ -d "/opt/rocm" ]; then sudo rm -rf /opt/rocm; fi
+          if [ -f "rocm.tar.gz" ]; then rm -f rocm.tar.gz; fi
+
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y cmake ninja-build unzip curl patchelf build-essential glslc libvulkan-dev mesa-vulkan-drivers spirv-headers
+
+      - name: Download and extract ROCm directly to /opt/rocm
+        run: |
+          rocm_version="${{ env.ROCM_VERSION }}"
+          current_target="${{ matrix.gfx_target }}"
+          s3_target="$current_target"
+          if [[ "$current_target" = "gfx103X" || "$current_target" = "gfx110X" || "$current_target" = "gfx120X" ]]; then
+            s3_target="${current_target}-all"
+          elif [ "$current_target" = "multiarch" ]; then
+            s3_target="gfx1151"
+          fi
+
+          base_url="https://rocm.nightlies.amd.com/tarball-multi-arch"
+          if [ "$rocm_version" = "latest" ]; then
+            echo "Auto-detecting latest ROCm version for $current_target"
+            prefix="therock-dist-linux-${s3_target}-"
+
+            files_json=$(curl -s "$base_url/" | tr '\n' ' ' | grep -oP 'const files = \K\[.*?\](?=\s*;)')
+            if [ -z "$files_json" ]; then
+              echo "Failed to parse file index from $base_url/"
+              exit 1
+            fi
+
+            latest_file=$(echo "$files_json" | jq -r --arg p "$prefix" \
+              '[.[] | select(.name | test("^" + $p + "[0-9]+\\.[0-9]+\\.[0-9]+(a|rc)[0-9]+\\.tar\\.gz$"))] | sort_by(.name | capture("(?<d>[0-9]{8})\\.tar\\.gz$").d) | last | .name // empty')
+            if [ -z "$latest_file" ]; then
+              echo "No tarball found for prefix '$prefix' at $base_url/"
+              exit 1
+            fi
+            echo "Found latest file: $latest_file"
+
+            if [[ "$latest_file" =~ therock-dist-linux-${s3_target}-([0-9]+\.[0-9]+\.[0-9]+(a|rc)[0-9]+)\.tar\.gz ]]; then
+              rocm_version="${BASH_REMATCH[1]}"
+              echo "Detected latest ROCm version: $rocm_version"
+            else
+              echo "Failed to extract ROCm version from: $latest_file"
+              exit 1
+            fi
+
+            rocm_url="$base_url/$latest_file"
+          else
+            rocm_url="$base_url/therock-dist-linux-${s3_target}-${rocm_version}.tar.gz"
+          fi
+
+          echo "DETECTED_ROCM_VERSION=$rocm_version" >> $GITHUB_ENV
+          sudo mkdir -p /opt/rocm
+          curl -sL "$rocm_url" | sudo tar --use-compress-program=gzip -xf - -C /opt/rocm --strip-components=1
+
+      - name: Set ROCm environment variables
+        run: |
+          echo "HIP_PATH=/opt/rocm" >> $GITHUB_ENV
+          echo "ROCM_PATH=/opt/rocm" >> $GITHUB_ENV
+          echo "HIP_PLATFORM=amd" >> $GITHUB_ENV
+          echo "HIP_CLANG_PATH=/opt/rocm/llvm/bin" >> $GITHUB_ENV
+          echo "HIP_INCLUDE_PATH=/opt/rocm/include" >> $GITHUB_ENV
+          echo "HIP_LIB_PATH=/opt/rocm/lib" >> $GITHUB_ENV
+          echo "HIP_DEVICE_LIB_PATH=/opt/rocm/lib/llvm/amdgcn/bitcode" >> $GITHUB_ENV
+          echo "/opt/rocm/bin:/opt/rocm/llvm/bin:$PATH" >> $GITHUB_PATH
+          echo "LD_LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:/opt/rocm/llvm/lib:${LD_LIBRARY_PATH:-}" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=/opt/rocm/lib:/opt/rocm/lib64:${LIBRARY_PATH:-}" >> $GITHUB_ENV
+          echo "CPATH=/opt/rocm/include:${CPATH:-}" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=/opt/rocm/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> $GITHUB_ENV
+
+      - name: Clone kingjones30 ROCmFPX
+        run: |
+          rocmfpx_repo="${{ env.ROCMFPX_REPO }}"
+          rocmfpx_version="${{ env.ROCMFPX_VERSION }}"
+          if [[ "$rocmfpx_repo" =~ ^https?:// ]]; then
+            repo_url="$rocmfpx_repo"
+          else
+            repo_url="https://github.com/${rocmfpx_repo}.git"
+          fi
+          if [ "$rocmfpx_version" = "latest" ] || [ "$rocmfpx_version" = "main" ]; then
+            git clone --depth 1 --single-branch --branch main "$repo_url" ROCmFPX
+          else
+            git clone --depth 1 --single-branch --branch "$rocmfpx_version" "$repo_url" ROCmFPX 2>/dev/null || {
+              git clone "$repo_url" ROCmFPX
+              cd ROCmFPX
+              git checkout "$rocmfpx_version" || git checkout --detach "$rocmfpx_version"
+              cd ..
+            }
+          fi
+          cd ROCmFPX
+          commit_hash=$(git rev-parse --short=7 HEAD)
+          echo "ROCMFPX_COMMIT_HASH=$commit_hash" >> $GITHUB_ENV
+          git log --oneline -1
+
+      - name: Build kingjones30 ROCmFPX + ROCm
+        run: |
+          current_target="${{ matrix.gfx_target }}"
+          if [ "$current_target" = "gfx120X" ]; then
+            mapped_target="gfx1200;gfx1201"
+          elif [ "$current_target" = "gfx110X" ]; then
+            mapped_target="gfx1100;gfx1101;gfx1102;gfx1103"
+          elif [ "$current_target" = "gfx103X" ]; then
+            mapped_target="gfx1030;gfx1031;gfx1032;gfx1034"
+          elif [ "$current_target" = "multiarch" ]; then
+            mapped_target="gfx1100;gfx1151"
+          else
+            mapped_target="$current_target"
+          fi
+
+          cd ROCmFPX
+          mkdir build
+          cd build
+
+          cmake .. -G Ninja \
+            -DCMAKE_C_COMPILER=/opt/rocm/llvm/bin/clang \
+            -DCMAKE_CXX_COMPILER=/opt/rocm/llvm/bin/clang++ \
+            -DCMAKE_CXX_FLAGS="-I/opt/rocm/include" \
+            -DCMAKE_CROSSCOMPILING=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGPU_TARGETS="$mapped_target" \
+            -DAMDGPU_TARGETS="$mapped_target" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_WEBUI=OFF \
+            -DGGML_HIP=ON \
+            -DGGML_HIP_FORCE_MMQ=ON \
+            -DGGML_VULKAN=ON \
+            -DGGML_AVX=ON \
+            -DGGML_AVX2=ON \
+            -DGGML_AVX512=ON \
+            -DGGML_F16C=ON \
+            -DGGML_FMA=ON \
+            -DGGML_OPENMP=OFF \
+            -DGGML_CUDA_FORCE_CUBLAS=OFF \
+            -DGGML_RPC=ON \
+            -DGGML_HIP_ROCWMMA_FATTN=OFF \
+            -DLLAMA_BUILD_BORINGSSL=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_STATIC=OFF \
+            -DCMAKE_SYSTEM_NAME=Linux
+
+          cmake --build . -j $(nproc)
+
+      - name: Copy ROCm core libs to build directory
+        run: |
+          build_bin_path="ROCmFPX/build/bin"
+          current_target="${{ matrix.gfx_target }}"
+
+          if [ "$current_target" != "multiarch" ]; then
+            rocblas_lib_path="/opt/rocm/lib/rocblas/library"
+            if [ -d "$rocblas_lib_path" ]; then
+              dest_rocblas_path="$build_bin_path/rocblas/library"
+              mkdir -p "$(dirname "$dest_rocblas_path")"
+              cp -r "$rocblas_lib_path" "$(dirname "$dest_rocblas_path")/"
+            fi
+
+            hipblaslt_lib_path="/opt/rocm/lib/hipblaslt/library"
+            if [ -d "$hipblaslt_lib_path" ]; then
+              dest_hipblaslt_path="$build_bin_path/hipblaslt/library"
+              mkdir -p "$(dirname "$dest_hipblaslt_path")"
+              cp -r "$hipblaslt_lib_path" "$(dirname "$dest_hipblaslt_path")/"
+            fi
+          fi
+
+          # Copy required ROCm dynamic shared libraries
+          cp -v /opt/rocm/lib/libhipblas.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/librocblas.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/libamdhip64.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/librocsolver.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/libroctx64.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/libhipblaslt.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_liblzma.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/librocprofiler-register.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/libamd_comgr.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/libamd_comgr_loader.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/libhsa-runtime64.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_numa.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/librocroller.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/liborigami.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/librocm_kpack.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_z.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_zstd.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/llvm/lib/libLLVM.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/llvm/lib/libclang-cpp.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_elf.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_drm.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_drm_amdgpu.so* "$build_bin_path/" 2>/dev/null || true
+          cp -v /opt/rocm/lib/rocm_sysdeps/lib/librocm_sysdeps_bz2.so* "$build_bin_path/" 2>/dev/null || true
+
+      - name: Set RPATH for portable distribution
+        run: |
+          cd ROCmFPX/build/bin
+          for file in *.so* llama-*; do
+            [ -f "$file" ] && [ ! -L "$file" ] && patchelf --set-rpath '$ORIGIN' "$file" 2>/dev/null || true
+          done
+
+      - name: Verify Linux Binaries and Dependencies
+        run: |
+          cd ROCmFPX/build/bin
+          ldd llama-server || true
+          ldd llama-cli || true
+          ./llama-cli --help | head -n 20 || true
+
+      - name: Upload Linux build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kingjones-rocmfpx-ubuntu-rocm-${{ matrix.gfx_target }}-x64
+          path: ROCmFPX/build/bin
+          retention-days: 7
+
+      - name: Set outputs
+        id: set-outputs
+        run: |
+          echo "rocm_version=${{ env.DETECTED_ROCM_VERSION }}" >> $GITHUB_OUTPUT
+          echo "rocmfpx_commit_hash=${{ env.ROCMFPX_COMMIT_HASH }}" >> $GITHUB_OUTPUT
+
+  create-release:
+    needs: [build-ubuntu]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    if: |
+      always() &&
+      needs.build-ubuntu.result == 'success' &&
+      github.event_name != 'pull_request' &&
+      (github.event_name == 'workflow_dispatch' && 
+       (github.event.inputs.create_release == 'true' || github.event.inputs.create_release == null) ||
+       github.event_name == 'schedule')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./all-artifacts
+
+      - name: Generate release tag
+        id: generate-tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          existing_tags=$(gh release list --limit 1000 --json tagName --jq '.[].tagName' | grep -E '^b[0-9]{4}$' | sort -V || echo "")
+
+          if [ -z "$existing_tags" ]; then
+            next_number=1000
+          else
+            highest_tag=$(echo "$existing_tags" | tail -n 1)
+            highest_number=$(echo "$highest_tag" | sed 's/^b//')
+            next_number=$((highest_number + 1))
+          fi
+
+          TAG=$(printf "b%04d" $next_number)
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "Generated release tag: ${TAG}"
+
+      - name: Create archives for all target artifacts
+        run: |
+          targets="${{ env.GFX_TARGETS }}"
+          TAG="${{ steps.generate-tag.outputs.tag }}"
+
+          IFS=',' read -ra TARGET_ARRAY <<< "$targets"
+
+          for target in "${TARGET_ARRAY[@]}"; do
+            target=$(echo "$target" | xargs)
+            artifact_name="kingjones-rocmfpx-ubuntu-rocm-${target}-x64"
+            artifact_dir="./all-artifacts/${artifact_name}"
+            final_archive_name="kingjones-rocmfpx-${TAG}-ubuntu-rocm-${target}-x64"
+
+            if [ -d "$artifact_dir" ]; then
+              cd "$artifact_dir"
+              chmod +x llama-* rpc-server 2>/dev/null || true
+              zip -r "../../${final_archive_name}.zip" *
+              cd ../../
+              echo "Created archive: ${final_archive_name}.zip"
+            else
+              echo "Warning: Artifact directory not found: $artifact_dir"
+            fi
+          done
+
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.generate-tag.outputs.tag }}"
+          ROCM_VERSION="${{ needs.build-ubuntu.outputs.rocm_version }}"
+          ROCMFPX_COMMIT_HASH="${{ needs.build-ubuntu.outputs.rocmfpx_commit_hash }}"
+          ROCMFPX_REPO="${{ env.ROCMFPX_REPO }}"
+          targets="${{ env.GFX_TARGETS }}"
+
+          upload_files=""
+          IFS=',' read -ra TARGET_ARRAY <<< "$targets"
+
+          for target in "${TARGET_ARRAY[@]}"; do
+            target=$(echo "$target" | xargs)
+            final_archive_name="kingjones-rocmfpx-${TAG}-ubuntu-rocm-${target}-x64"
+            if [ -f "${final_archive_name}.zip" ]; then
+              upload_files="${upload_files} ${final_archive_name}.zip"
+            fi
+          done
+
+          gh release create "$TAG" \
+            --title "ROCmFPX (kingjones30) $TAG" \
+            --notes "**Build Number**: $TAG
+          **Operating System**: Ubuntu Linux (x86_64)
+          **Target Hardware**: AMD GPUs ($targets)
+          **ROCm Version**: $ROCM_VERSION
+          **Source Repository**: $ROCMFPX_REPO
+          **Commit Hash**: $ROCMFPX_COMMIT_HASH
+          **Build Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+          ## 🚀 kingjones30 ROCmFPX Overview
+          This build packages **kingjones30/ROCmFPX** featuring native ROCmFP4 / ROCmFPX quantization support combined with **7 extended model architectures**:
+
+          | Architecture | Supported Models |
+          |---|---|
+          | \`mellum\` | Mellum2-12B-A2.5B |
+          | \`instella\` | Instella-MoE-16B-A3B |
+          | \`bailing-hybrid\` | Ling-3.0 \`*-base-*\` (KDA + MLA hybrid) |
+          | \`muse-glimmer\` | Muse-Glimmer-30B |
+          | \`qwen4exp\` | Qwen3.8-Flash-Next |
+          | \`zaya\` | ZAYA1-8B |
+          | \`cohere2moe\` | North-Mini-Code-1.0 |
+
+          All release archives include pre-bundled AMD ROCm™ 7 runtime libraries with portable \`\$ORIGIN\` RPATHs.
+
+          ## 🍺 Homebrew Installation
+          \`\`\`bash
+          brew tap Heretek-AI/tap
+          brew install kingjones-rocmfpx
+          \`\`\`" \
+            $upload_files
+
+      - name: Trigger Homebrew Tap Formula Update
+        if: success()
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          TAG: ${{ steps.generate-tag.outputs.tag }}
+        run: |
+          if [ -n "$TAP_TOKEN" ]; then
+            echo "Notifying Homebrew Tap of new release: $TAG"
+            GITHUB_TOKEN="$TAP_TOKEN" gh api -X POST "/repos/Heretek-AI/homebrew-tap/dispatches" \
+              -f event_type="builder-release" \
+              -f client_payload[builder]="kingjones-rocmfpx" \
+              -f client_payload[release_tag]="$TAG"
+            echo "[✓] Successfully dispatched event to Heretek-AI/homebrew-tap"
+          else
+            echo "::notice title=Tap Dispatch Skipped::TAP_GITHUB_TOKEN secret is not configured in repository secrets. Cross-repository dispatch was skipped. homebrew-tap's scheduled autobump.yml workflow (runs every 4 hours) will automatically synchronize this release ($TAG)."
+          fi

@@ -10,7 +10,7 @@
 [![GPU Targets](https://img.shields.io/badge/GPU-gfx1151%20%7C%20gfx1150%20%7C%20gfx120X%20%7C%20gfx110X%20%7C%20gfx103X%20%7C%20gfx90a%20%7C%20gfx908-00B04F?logo=amd&logoColor=white)](#-supported-devices)
 
 <p align="center">
-  <b>High-performance automated nightly and on-demand builds of <a href="https://github.com/charlie12345/ROCmFPX">ROCmFPX (Upstream)</a>, <a href="https://github.com/ciru-ai/ROCmFPX">Ciru-AI ROCmFPX</a>, and <a href="https://github.com/julianmb/q38rocm">q38rocm</a> with built-in AMD ROCm™ 7 runtime libraries for Windows & Ubuntu.</b>
+  <b>High-performance automated nightly and on-demand builds of <a href="https://github.com/charlie12345/ROCmFPX">ROCmFPX (Upstream)</a>, <a href="https://github.com/ciru-ai/ROCmFPX">Ciru-AI ROCmFPX</a>, <a href="https://github.com/kingjones30/ROCmFPX">kingjones30 ROCmFPX</a>, and <a href="https://github.com/julianmb/q38rocm">q38rocm</a> with built-in AMD ROCm™ 7 runtime libraries for Windows & Ubuntu.</b>
 </p>
 
 </div>
@@ -19,7 +19,7 @@
 
 ## ⚡ Supported Engine Variants
 
-This repository provides automated build pipelines and release artifacts for three distinct ROCm inference engines:
+This repository provides automated build pipelines and release artifacts for four distinct ROCm inference engines:
 
 ```mermaid
 flowchart TD
@@ -27,6 +27,7 @@ flowchart TD
         E1["1. ROCmFPX Upstream (charlie12345/ROCmFPX)<br/>Official upstream engine • Active llama.cpp tracking • Multi-GPU HIP/MMQ"]
         E2["2. Ciru-AI ROCmFPX (ciru-ai/ROCmFPX)<br/>Ciru research fork • DualView Q7/Q8 • PromptForge • Kairic Edge profiles"]
         E3["3. q38rocm (julianmb/q38rocm)<br/>Dedicated Qwen 3.8 27B Strix Halo stack • 36 tok/s • MTP Speculative Decoding"]
+        E4["4. kingjones30 ROCmFPX (kingjones30/ROCmFPX)<br/>7 Extended Architectures • Mellum, Instella, Qwen4Exp, Bailing-Hybrid • ROCmFP4/FP8"]
     end
 ```
 
@@ -51,6 +52,17 @@ Julian's dedicated deployment stack for **Qwen 3.8 27B** on **AMD Strix Halo (Ry
 - **Asymmetric TurboQuant KV Cache** (`-ctk q8_0 -ctv turbo4`): Compresses 262K context RAM from 61.4 GB to 20.08 GB.
 - **Mesa RADV Wave64 cooperative matrices** (`KHR_coopmat`).
 - **Homebrew Formula**: `brew install q38rocm`
+
+### 4. **kingjones30 ROCmFPX** ([`kingjones30/ROCmFPX`](https://github.com/kingjones30/ROCmFPX))
+King Jones's extended ROCmFPX fork providing native ROCmFP4 / ROCmFP8 tensor types paired with **7 model architectures**:
+- **`mellum`**: Mellum2-12B-A2.5B (~96.92 tok/s).
+- **`instella`**: AMD Instella-MoE-16B-A3B (~90 tok/s).
+- **`bailing-hybrid`**: Ling-3.0 `*-base-*` (KDA + MLA hybrid, fixes compressed queries loader bug) (~36.6–42.3 tok/s).
+- **`muse-glimmer`**: Muse-Glimmer-30B (~30 tok/s).
+- **`qwen4exp`**: Qwen3.8-Flash-Next (345 tok/s prefill, 22.6 tok/s decode).
+- **`zaya`**: ZAYA1-8B (~15.8 tok/s).
+- **`cohere2moe`**: North-Mini-Code-1.0.
+- **Homebrew Formula**: `brew install kingjones-rocmfpx`
 
 > [!IMPORTANT]  
 > **⚡ Ready to Run — ROCm™ 7 Built-in**: All binaries include complete ROCm 7 runtime libraries, hipBLAS, rocBLAS, and hipBLASLt kernels with portable `$ORIGIN` RPATHs. **No separate AMD ROCm™ SDK or driver installation is required on Windows or Linux!**
@@ -162,6 +174,7 @@ HIP_VISIBLE_DEVICES=1 /home/linuxbrew/.linuxbrew/opt/q38rocm/bin/llama-server \
 - [`.github/workflows/build-rocmfpx.yml`](.github/workflows/build-rocmfpx.yml): Multi-OS, multi-GPU matrix builder for canonical upstream `charlie12345/ROCmFPX`.
 - [`.github/workflows/build-rocmfpx-profile.yml`](.github/workflows/build-rocmfpx-profile.yml): On-demand certified builder for `ciru-ai/ROCmFPX` (`kairic-edge`, `promptforge`, DualView).
 - [`.github/workflows/build-q38rocm.yml`](.github/workflows/build-q38rocm.yml): Dedicated Strix Halo `gfx1151` builder for `q38rocm`.
+- [`.github/workflows/build-kingjones-rocmfpx.yml`](.github/workflows/build-kingjones-rocmfpx.yml): Multi-target matrix builder for `kingjones30/ROCmFPX`.
 
 ---
 
@@ -169,5 +182,6 @@ HIP_VISIBLE_DEVICES=1 /home/linuxbrew/.linuxbrew/opt/q38rocm/bin/llama-server \
 
 - **ROCmFPX (Upstream)**: Developed by Charlie ([charlie12345/ROCmFPX](https://github.com/charlie12345/ROCmFPX)) under the MIT License.
 - **ROCmFPX (Ciru Fork)**: Developed by Ciru ([ciru-ai/ROCmFPX](https://github.com/ciru-ai/ROCmFPX)) under the MIT License.
+- **ROCmFPX (kingjones30 Fork)**: Developed by King Jones ([kingjones30/ROCmFPX](https://github.com/kingjones30/ROCmFPX)) under the MIT License.
 - **q38rocm**: Developed by Julian ([julianmb/q38rocm](https://github.com/julianmb/q38rocm)) under the Apache 2.0 License.
 - **llama.cpp**: Developed by Georgi Gerganov and contributors under the MIT License.
